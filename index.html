@@ -1269,7 +1269,7 @@ Groups:
    DATA
 ===================================================== */
 
-  const SUPABASE_URL = "https://gkbhqpikqnhmwqyeamwq.supabase.co/rest/v1/";
+  const SUPABASE_URL = "https://gkbhqpikqnhmwqyeamwq.supabase.co";
 const SUPABASE_KEY = "sb_publishable_jEydXwqKEqmdmlRPYLAQ9g_wMesM0Kh";
 
 const supabaseClient = supabase.createClient(
@@ -1287,6 +1287,38 @@ const supabaseClient = supabase.createClient(
             console.log("✅ Supabase connected successfully!");
         }
     });
+  
+  async function adminLogin() {
+
+    const email = document.getElementById("loginEmail").value.trim();
+    const password = document.getElementById("loginPassword").value;
+    const message = document.getElementById("loginMessage");
+
+    if (!email || !password) {
+        message.innerText = "Please enter email and password.";
+        return;
+    }
+
+    message.style.color = "#dc2626";
+    message.innerText = "Logging in...";
+
+    const { data, error } =
+        await supabaseClient.auth.signInWithPassword({
+            email: email,
+            password: password
+        });
+
+    if (error) {
+        message.innerText = "Invalid email or password.";
+        console.error(error);
+        return;
+    }
+
+    message.style.color = "#16a34a";
+    message.innerText = "Login successful!";
+
+    document.getElementById("loginScreen").style.display = "none";
+  }
 let students =
 JSON.parse(localStorage.getItem("students")) || [];
 
