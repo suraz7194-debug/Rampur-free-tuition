@@ -1334,6 +1334,17 @@ const supabaseClient = supabase.createClient(
 }
 
 checkAdminSession();
+
+  async function adminLogout() {
+    const { error } = await supabaseClient.auth.signOut();
+
+    if (error) {
+        console.error("Logout error:", error);
+        return;
+    }
+
+    document.getElementById("loginScreen").style.display = "flex";
+  }
 let students =
 JSON.parse(localStorage.getItem("students")) || [];
 
