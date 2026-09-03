@@ -1345,6 +1345,18 @@ checkAdminSession();
 
     document.getElementById("loginScreen").style.display = "flex";
   }
+
+  async function adminLogout() {
+    const { error } = await supabaseClient.auth.signOut();
+
+    if (error) {
+        console.error("Logout error:", error);
+        return;
+    }
+
+    document.getElementById("loginMessage").innerText = "";
+    document.getElementById("loginScreen").style.display = "flex";
+  }
 let students =
 JSON.parse(localStorage.getItem("students")) || [];
 
