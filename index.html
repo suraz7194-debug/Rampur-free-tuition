@@ -1319,6 +1319,17 @@ const supabaseClient = supabase.createClient(
 
     document.getElementById("loginScreen").style.display = "none";
   }
+
+  async function checkAdminSession() {
+    const { data: { session } } =
+        await supabaseClient.auth.getSession();
+
+    if (session) {
+        document.getElementById("loginScreen").style.display = "none";
+    }
+}
+
+checkAdminSession();
 let students =
 JSON.parse(localStorage.getItem("students")) || [];
 
