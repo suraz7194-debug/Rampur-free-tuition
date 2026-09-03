@@ -491,6 +491,63 @@ th{
 </head>
 
 <body>
+  
+  <div id="loginScreen" style="
+    position:fixed;
+    inset:0;
+    background:#f3f4f6;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    z-index:9999;
+    padding:20px;
+">
+    <div style="
+        background:white;
+        padding:25px;
+        border-radius:12px;
+        width:100%;
+        max-width:380px;
+        box-shadow:0 4px 20px rgba(0,0,0,0.15);
+    ">
+        <h2 style="text-align:center;margin-bottom:20px;">
+            🔐 Admin Login
+        </h2>
+
+        <input
+            id="loginEmail"
+            type="email"
+            placeholder="Admin email"
+            style="width:100%;padding:12px;margin-bottom:10px;"
+        >
+
+        <input
+            id="loginPassword"
+            type="password"
+            placeholder="Password"
+            style="width:100%;padding:12px;margin-bottom:15px;"
+        >
+
+        <button
+            onclick="adminLogin()"
+            style="
+                width:100%;
+                padding:12px;
+                background:#2563eb;
+                color:white;
+                border:0;
+                border-radius:7px;
+                font-size:16px;
+            "
+        >
+            Login
+        </button>
+
+        <p id="loginMessage"
+           style="text-align:center;margin-top:12px;color:#dc2626;">
+        </p>
+    </div>
+  </div>
 
 <header>
 <h1>🎓 Rampur Free Tuition Center</h1>
