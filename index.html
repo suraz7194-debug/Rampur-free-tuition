@@ -1334,34 +1334,8 @@ const supabaseClient = supabase.createClient(
 }
 
 checkAdminSession();
-
-  async function testStudentsConnection() {
-    const { data, error } = await supabaseClient
-        .from("students")
-        .select("*")
-        .limit(5);
-
-    if (error) {
-        console.error("❌ Students connection failed:", error);
-    } else {
-        console.log("✅ Students table connected:", data);
-    }
-}
-
-testStudentsConnection();
-
-  async function adminLogout() {
-    const { error } = await supabaseClient.auth.signOut();
-
-    if (error) {
-        console.error("Logout error:", error);
-        return;
-    }
-
-    document.getElementById("loginScreen").style.display = "flex";
-  }
-
-  async function adminLogout() {
+  
+async function adminLogout() {
     const { error } = await supabaseClient.auth.signOut();
 
     if (error) {
@@ -1371,7 +1345,8 @@ testStudentsConnection();
 
     document.getElementById("loginMessage").innerText = "";
     document.getElementById("loginScreen").style.display = "flex";
-  }
+}
+  
 let students =
 JSON.parse(localStorage.getItem("students")) || [];
 
