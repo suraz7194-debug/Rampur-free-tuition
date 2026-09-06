@@ -89,20 +89,233 @@ async function adminLogout() {
    DATA
 ===================================================== */
 
-let students =
-JSON.parse(localStorage.getItem("students")) || [];
+let students = [];
 
-let attendance =
-JSON.parse(localStorage.getItem("attendance")) || {};
+async function loadStudentsFromSupabase() {
+    const { data, error } = await supabaseClient
+        .from("students")
+        .select("*")
+        .order("id", { ascending: true });
 
-let fees =
-JSON.parse(localStorage.getItem("fees")) || [];
+    if (error) {
+    console.error("SUPABASE LOAD ERROR:", error);
+    alert("Supabase Load Error:\n" + error.message);
+    return;
+    }
+  
 
-let exams =
-JSON.parse(localStorage.getItem("exams")) || {};
+    students = data.map(row => ({
+        id: row.id,
+        name: row.name,
+        className: row.class,
+        roll: row.roll,
+        parent: row.parent,
+        phone: row.phone,
+        group: row.group,
+        joined: row.date_joined,
+        photo: row.photo || ""
+    }));
 
-let results =
-JSON.parse(localStorage.getItem("results")) || {};
+    renderAll();
+}
+
+let attendance = {};
+
+async function loadAttendanceFromSupabase(){
+
+    const { data, error } =
+        await supabaseClient
+        .from("attendance")
+        .select("*")
+        .order("date", { ascending: true });
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE ATTENDANCE LOAD ERROR:",
+            error
+        );
+
+        alert(
+            "Could not load attendance from Supabase."
+        );
+
+        return;
+
+    }
+
+
+    attendance = {};
+
+
+    data.forEach(row => {
+
+        if(!attendance[row.date]){
+
+            attendance[row.date] = {};
+
+        }
+
+
+        attendance[row.date][row.student_id] =
+            row.status;
+
+    });
+
+
+    renderAttendance();
+renderMonthlyAttendance();
+renderDashboard();
+
+}
+
+let fees = [];
+
+async function loadFeesFromSupabase(){
+
+    const { data, error } =
+        await supabaseClient
+        .from("fees")
+        .select("*")
+        .order("date", { ascending: true });
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE FEES LOAD ERROR:",
+            error
+        );
+
+        alert(
+            "Could not load fees from Supabase."
+        );
+
+        return;
+
+    }
+
+
+    fees = data.map(row => ({
+
+        id: row.id,
+
+        studentId: row.student_id,
+
+        month: row.month,
+
+        amount: Number(row.amount),
+
+        paidDate: row.date
+
+    }));
+
+
+    renderFees();
+
+}
+
+let exams = [];
+
+async function loadExamsFromSupabase(){
+
+    const { data, error } =
+        await supabaseClient
+        .from("exams")
+        .select("*")
+        .order("date", { ascending: true });
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE EXAMS LOAD ERROR:",
+            error
+        );
+
+        alert(
+            "Could not load exams from Supabase."
+        );
+
+        return;
+
+    }
+
+
+    exams = data.map(row => ({
+
+        id: row.id,
+
+        name: row.exam_name,
+
+        date: row.date
+
+    }));
+
+
+    renderExamSelect();
+
+}
+
+let results = {};
+
+async function loadResultsFromSupabase(){
+
+    const { data, error } =
+        await supabaseClient
+        .from("results")
+        .select("*");
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE RESULTS LOAD ERROR:",
+            error
+        );
+
+        alert(
+            "Could not load results from Supabase."
+        );
+
+        return;
+
+    }
+
+
+    results = {};
+
+
+    data.forEach(row => {
+
+        if(!results[row.exam_id]){
+
+            results[row.exam_id] = {};
+
+        }
+
+
+        results[row.exam_id][row.student_id] = {
+
+            english: Number(row.english || 0),
+
+            nepali: Number(row.nepali || 0),
+
+            math: Number(row.maths || 0),
+
+            science: Number(row.science || 0),
+
+            total: Number(row.total || 0)
+
+        };
+
+    });
+
+
+    renderResults();
+
+}
 
 
 /*
@@ -112,42 +325,86 @@ JSON.parse(localStorage.getItem("results")) || {};
    Group A, B and C are automatically created.
 */
 
-let groups =
-JSON.parse(localStorage.getItem("groups")) ||
-["A","B","C"];
+let groups = [];
+let groupIds = {};
+
+let studentGroup = "A";
+
+let attendanceGroup = "A";
+
+let resultGroup = "A";
+
+async function loadGroupsFromSupabase(){
+
+    const { data, error } =
+        await supabaseClient
+        .from("groups")
+        .select("*")
+        .order("id", { ascending: true });
 
 
-/* Remove duplicate groups */
+    if(error){
 
-groups = [
-    ...new Set(
-        groups.map(g => String(g).trim())
-    )
-].filter(Boolean);
+        console.error(
+            "SUPABASE GROUPS LOAD ERROR:",
+            error
+        );
+
+        alert(
+            "Could not load groups from Supabase:\n" +
+            error.message
+        );
+
+        return;
+
+    }
 
 
-/*
-   Make sure old students' groups
-   still exist.
-*/
+    groupIds = {};
 
-students.forEach(s => {
+data.forEach(row => {
 
-    if (!groups.includes(s.group)) {
-        groups.push(s.group);
+    let name =
+        String(row.name).trim();
+
+    if(name){
+        groupIds[name] = row.id;
     }
 
 });
 
+groups =
+    data
+    .map(row => String(row.name).trim())
+    .filter(Boolean);
 
-let studentGroup =
-groups[0] || "A";
 
-let attendanceGroup =
-groups[0] || "A";
+    if(groups.length === 0){
 
-let resultGroup =
-groups[0] || "A";
+        groups = ["A"];
+
+    }
+
+
+    studentGroup =
+        groups.includes(studentGroup)
+            ? studentGroup
+            : groups[0];
+
+    attendanceGroup =
+        groups.includes(attendanceGroup)
+            ? attendanceGroup
+            : groups[0];
+
+    resultGroup =
+        groups.includes(resultGroup)
+            ? resultGroup
+            : groups[0];
+
+
+    renderAll();
+
+}
 
 
 let selectedStudentPhoto = "";
@@ -163,35 +420,8 @@ let selectedHistoryStudentId = null;
 
 function saveAll(){
 
-    localStorage.setItem(
-        "students",
-        JSON.stringify(students)
-    );
-
-    localStorage.setItem(
-        "attendance",
-        JSON.stringify(attendance)
-    );
-
-    localStorage.setItem(
-        "fees",
-        JSON.stringify(fees)
-    );
-
-    localStorage.setItem(
-        "exams",
-        JSON.stringify(exams)
-    );
-
-    localStorage.setItem(
-        "results",
-        JSON.stringify(results)
-    );
-
-    localStorage.setItem(
-        "groups",
-        JSON.stringify(groups)
-    );
+    // Supabase is now the permanent database.
+    // No localStorage backup is needed here.
 
 }
 
@@ -411,7 +641,6 @@ function renderGroupButtons(){
 /* =========================
    GROUP MANAGEMENT LIST
 ========================= */
-
 function renderManageGroups(){
 
     let container =
@@ -422,67 +651,134 @@ function renderManageGroups(){
     if(!container)
         return;
 
-
     container.innerHTML = "";
 
-
-    groups.forEach(group=>{
+    groups.forEach(group => {
 
         let box =
             document.createElement("div");
 
-        box.style.display = "flex";
-        box.style.alignItems = "center";
-        box.style.gap = "8px";
-        box.style.flexWrap = "wrap";
-        box.style.padding = "10px";
-        box.style.marginBottom = "7px";
-        box.style.background = "#f8fafc";
-        box.style.borderRadius = "8px";
-
+        box.className = "modern-group-row";
 
         let count =
             students.filter(
                 s => s.group === group
             ).length;
 
+        let groupId =
+            groupIds[group];
 
         box.innerHTML = `
 
-<strong style="min-width:100px;">
-👥 ${escapeHTML(group)}
-</strong>
+            <div class="modern-group-info">
 
-<span class="small" style="margin:0;">
-${count} student${count===1?"":"s"}
-</span>
+                <div class="modern-group-icon">
+                    👥
+                </div>
 
-<button
-class="btn"
-onclick="editGroup('${encodeURIComponent(group)}')">
-✏️ Edit
-</button>
+                <div>
 
-<button
-class="btn red"
-onclick="deleteGroup('${encodeURIComponent(group)}')">
-🗑 Delete
-</button>
+                    <strong>
+                        ${escapeHTML(group)}
+                    </strong>
 
-`;
+                    <span>
+                        ${count} student${count === 1 ? "" : "s"}
+                    </span>
+
+                </div>
+
+            </div>
+
+
+            <div class="modern-group-menu">
+
+                <button
+                    class="group-menu-button"
+                    onclick="toggleGroupMenu(this)">
+                    ⋮
+                </button>
+
+                <div class="group-menu-dropdown">
+
+                    <button
+                        onclick="editGroup(${groupId})">
+                        ✏️
+                        <span>Edit Group</span>
+                    </button>
+
+                    <button
+                        class="delete-option"
+                        onclick="deleteGroup(${groupId})">
+                        🗑️
+                        <span>Delete Group</span>
+                    </button>
+
+                </div>
+
+            </div>
+
+        `;
 
         container.appendChild(box);
 
     });
 
 }
+function toggleGroupMenu(button){
 
+    let menu =
+        button.parentElement
+        .querySelector(
+            ".group-menu-dropdown"
+        );
+
+    document
+        .querySelectorAll(
+            ".group-menu-dropdown"
+        )
+        .forEach(otherMenu => {
+
+            if(otherMenu !== menu){
+                otherMenu.classList.remove(
+                    "show"
+                );
+            }
+
+        });
+
+    menu.classList.toggle("show");
+
+}
+document.addEventListener("click", function(event){
+
+    if(
+        !event.target.closest(
+            ".modern-group-menu"
+        )
+    ){
+
+        document
+            .querySelectorAll(
+                ".group-menu-dropdown"
+            )
+            .forEach(menu => {
+
+                menu.classList.remove(
+                    "show"
+                );
+
+            });
+
+    }
+
+});
 
 /* =========================
    ADD GROUP
 ========================= */
 
-function addGroup(){
+async function addGroup(){
 
     let input =
         document.getElementById(
@@ -495,7 +791,9 @@ function addGroup(){
 
     if(!name){
 
-        alert("Please enter a group name.");
+        alert(
+            "Please enter a group name."
+        );
 
         return;
 
@@ -506,31 +804,73 @@ function addGroup(){
 
     let exists =
         groups.some(
-            g => g.toLowerCase() === name.toLowerCase()
+            g =>
+                g.toLowerCase() ===
+                name.toLowerCase()
         );
+
 
     if(exists){
 
-        alert("This group already exists.");
+        alert(
+            "This group already exists."
+        );
 
         return;
 
     }
 
 
-    groups.push(name);
+    /* =========================
+       SAVE GROUP TO SUPABASE
+    ========================= */
+
+    const { data, error } =
+        await supabaseClient
+        .from("groups")
+        .insert({
+
+            name: name
+
+        })
+        .select()
+        .single();
 
 
-    /*
-       Select newly created group
-    */
+    if(error){
 
-    studentGroup = name;
-    attendanceGroup = name;
-    resultGroup = name;
+        console.error(
+            "SUPABASE GROUP INSERT ERROR:",
+            error
+        );
+
+        alert(
+            "Could not add group:\n" +
+            error.message
+        );
+
+        return;
+
+    }
 
 
-    saveAll();
+    /* =========================
+       UPDATE LOCAL STATE
+    ========================= */
+
+    groups.push(
+        data.name
+    );
+groupIds[data.name] = data.id;
+
+    studentGroup =
+        data.name;
+
+    attendanceGroup =
+        data.name;
+
+    resultGroup =
+        data.name;
 
 
     input.value = "";
@@ -540,7 +880,9 @@ function addGroup(){
 
 
     alert(
-        "Group '" + name + "' added successfully."
+        "Group '" +
+        data.name +
+        "' added successfully."
     );
 
 }
@@ -549,11 +891,23 @@ function addGroup(){
 /* =========================
    EDIT GROUP
 ========================= */
+async function editGroup(groupId){
 
-function editGroup(encodedGroup){
-
+    /* Find group by Supabase ID */
     let oldName =
-        decodeURIComponent(encodedGroup);
+        Object.keys(groupIds)
+        .find(
+            name =>
+                String(groupIds[name]) ===
+                String(groupId)
+        );
+
+    if(!oldName){
+        alert(
+            "Group not found."
+        );
+        return;
+    }
 
 
     let newName =
@@ -567,53 +921,156 @@ function editGroup(encodedGroup){
         return;
 
 
-    newName = newName.trim();
+    newName =
+        newName.trim();
 
 
     if(!newName){
 
-        alert("Group name cannot be empty.");
+        alert(
+            "Group name cannot be empty."
+        );
 
         return;
 
     }
 
+
+    /* Check duplicate */
 
     let duplicate =
         groups.some(
             g =>
                 g !== oldName &&
-                g.toLowerCase() === newName.toLowerCase()
+                g.toLowerCase() ===
+                newName.toLowerCase()
         );
 
 
     if(duplicate){
 
-        alert("A group with this name already exists.");
+        alert(
+            "A group with this name already exists."
+        );
 
         return;
 
     }
 
 
-    /*
-       Rename group in students
-    */
+    /* =========================
+       UPDATE STUDENTS
+    ========================= */
 
-    students.forEach(student=>{
+    let response =
+        await supabaseClient
+        .from("students")
+        .update({
+            group: newName
+        })
+        .eq("group", oldName);
+
+
+    if(response.error){
+
+        console.error(
+            "SUPABASE STUDENT GROUP UPDATE ERROR:",
+            response.error
+        );
+
+        alert(
+            "Could not update students:\n" +
+            response.error.message
+        );
+
+        return;
+
+    }
+
+
+    /* =========================
+       UPDATE GROUP BY ID
+    ========================= */
+
+    response =
+        await supabaseClient
+        .from("groups")
+        .update({
+            name: newName
+        })
+        .eq("id", groupId);
+
+
+    if(response.error){
+
+        console.error(
+            "SUPABASE GROUP UPDATE ERROR:",
+            response.error
+        );
+
+        /* Try to move students back */
+
+        await supabaseClient
+        .from("students")
+        .update({
+            group: oldName
+        })
+        .eq("group", newName);
+
+
+        alert(
+            "Could not rename group:\n" +
+            response.error.message
+        );
+
+        return;
+
+    }
+
+
+    /* =========================
+       UPDATE LOCAL STUDENTS
+    ========================= */
+
+    students.forEach(student => {
 
         if(student.group === oldName){
 
-            student.group = newName;
+            student.group =
+                newName;
 
         }
 
     });
 
 
-    /*
-       Rename group selections
-    */
+    /* =========================
+       UPDATE LOCAL GROUP LIST
+    ========================= */
+
+    let index =
+        groups.indexOf(oldName);
+
+
+    if(index !== -1){
+
+        groups[index] =
+            newName;
+
+    }
+
+
+    /* Update ID mapping */
+
+    delete groupIds[oldName];
+
+    groupIds[newName] =
+        groupId;
+
+
+    /* =========================
+       UPDATE SELECTED GROUPS
+    ========================= */
 
     if(studentGroup === oldName)
         studentGroup = newName;
@@ -625,40 +1082,40 @@ function editGroup(encodedGroup){
         resultGroup = newName;
 
 
-    /*
-       Replace group name
-    */
-
-    let index =
-        groups.indexOf(oldName);
-
-    if(index !== -1){
-
-        groups[index] = newName;
-
-    }
-
-
-    saveAll();
-
     renderAll();
 
 
     alert(
-        "Group renamed successfully."
+        "✅ Group renamed successfully."
     );
 
 }
 
-
 /* =========================
    DELETE GROUP
 ========================= */
+async function deleteGroup(groupId){
 
-function deleteGroup(encodedGroup){
+    /* Find group name from Supabase ID */
 
     let group =
-        decodeURIComponent(encodedGroup);
+        Object.keys(groupIds)
+        .find(
+            name =>
+                String(groupIds[name]) ===
+                String(groupId)
+        );
+
+
+    if(!group){
+
+        alert(
+            "Group not found."
+        );
+
+        return;
+
+    }
 
 
     if(groups.length <= 1){
@@ -699,9 +1156,9 @@ function deleteGroup(encodedGroup){
         return;
 
 
-    /*
-       Choose another group
-    */
+    /* =========================
+       CHOOSE REPLACEMENT
+    ========================= */
 
     let replacement =
         groups.find(
@@ -709,13 +1166,95 @@ function deleteGroup(encodedGroup){
         );
 
 
+    /* =========================
+       MOVE STUDENTS
+    ========================= */
+
     if(studentCount > 0){
 
-        students.forEach(student=>{
+        let response =
+            await supabaseClient
+            .from("students")
+            .update({
+                group: replacement
+            })
+            .eq("group", group);
+
+
+        if(response.error){
+
+            console.error(
+                "SUPABASE STUDENT GROUP MOVE ERROR:",
+                response.error
+            );
+
+            alert(
+                "Could not move students:\n" +
+                response.error.message
+            );
+
+            return;
+
+        }
+
+    }
+
+
+    /* =========================
+       DELETE GROUP BY ID
+    ========================= */
+
+    const { error } =
+        await supabaseClient
+        .from("groups")
+        .delete()
+        .eq("id", groupId);
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE GROUP DELETE ERROR:",
+            error
+        );
+
+
+        /* Try to move students back */
+
+        if(studentCount > 0){
+
+            await supabaseClient
+            .from("students")
+            .update({
+                group: group
+            })
+            .eq("group", replacement);
+
+        }
+
+
+        alert(
+            "Could not delete group:\n" +
+            error.message
+        );
+
+        return;
+
+    }
+
+
+    /* =========================
+       UPDATE LOCAL STUDENTS
+    ========================= */
+
+    if(studentCount > 0){
+
+        students.forEach(student => {
 
             if(student.group === group){
 
-                student.group = replacement;
+                student.group =
+                    replacement;
 
             }
 
@@ -724,9 +1263,9 @@ function deleteGroup(encodedGroup){
     }
 
 
-    /*
-       Remove group
-    */
+    /* =========================
+       REMOVE LOCAL GROUP
+    ========================= */
 
     groups =
         groups.filter(
@@ -734,9 +1273,14 @@ function deleteGroup(encodedGroup){
         );
 
 
-    /*
-       Fix selected groups
-    */
+    /* Remove ID mapping */
+
+    delete groupIds[group];
+
+
+    /* =========================
+       FIX SELECTED GROUPS
+    ========================= */
 
     if(studentGroup === group)
         studentGroup = replacement;
@@ -748,18 +1292,17 @@ function deleteGroup(encodedGroup){
         resultGroup = replacement;
 
 
-    saveAll();
-
     renderAll();
 
 
     alert(
-        "Group deleted. Students were moved to " +
-        replacement + "."
+        "✅ Group deleted successfully.\n" +
+        "Students were moved to " +
+        replacement +
+        "."
     );
 
 }
-
 
 /* =====================================================
    PHOTO COMPRESSION
@@ -1012,7 +1555,7 @@ function previewEditStudentPhoto(event){
    ADD STUDENT
 ===================================================== */
 
-function addStudent(){
+async function addStudent(){
 
     let name =
         document.getElementById(
@@ -1058,7 +1601,44 @@ function addStudent(){
 
     if(!group){
 
-        alert("Please select a group.");
+        alert(
+            "Please select a group."
+        );
+
+        return;
+
+    }
+
+
+    const { data, error } =
+        await supabaseClient
+        .from("students")
+        .insert({
+
+            name: name,
+            class: className,
+            roll: roll,
+            parent: parent,
+            phone: phone,
+            group: group,
+            date_joined: today(),
+            photo: selectedStudentPhoto || ""
+
+        })
+        .select()
+        .single();
+
+
+    if(error){
+
+        console.error(
+            "Error adding student:",
+            error
+        );
+
+        alert(
+            "Could not save student to database."
+        );
 
         return;
 
@@ -1067,23 +1647,15 @@ function addStudent(){
 
     students.push({
 
-        id: Date.now(),
-
-        name: name,
-
-        className: className,
-
-        roll: roll,
-
-        parent: parent,
-
-        phone: phone,
-
-        group: group,
-
-        joined: today(),
-
-        photo: selectedStudentPhoto || ""
+        id: data.id,
+        name: data.name,
+        className: data.class,
+        roll: data.roll,
+        parent: data.parent,
+        phone: data.phone,
+        group: data.group,
+        joined: data.date_joined,
+        photo: data.photo || ""
 
     });
 
@@ -1131,8 +1703,9 @@ function addStudent(){
     renderAll();
 
 
-    alert("Student added.");
-
+    alert(
+        "Student added."
+    );
 }
 
 
@@ -1263,7 +1836,7 @@ function editStudent(id){
    SAVE STUDENT EDIT
 ===================================================== */
 
-function saveStudentEdit(){
+async function saveStudentEdit(){
 
     let id =
         Number(
@@ -1281,7 +1854,9 @@ function saveStudentEdit(){
 
     if(!student){
 
-        alert("Student not found.");
+        alert(
+            "Student not found."
+        );
 
         return;
 
@@ -1293,25 +1868,30 @@ function saveStudentEdit(){
             "editStudentName"
         ).value.trim();
 
+
     let className =
         document.getElementById(
             "editStudentClass"
         ).value.trim();
+
 
     let roll =
         document.getElementById(
             "editStudentRoll"
         ).value.trim();
 
+
     let parent =
         document.getElementById(
             "editParentName"
         ).value.trim();
 
+
     let phone =
         document.getElementById(
             "editParentPhone"
         ).value.trim();
+
 
     let group =
         document.getElementById(
@@ -1330,30 +1910,73 @@ function saveStudentEdit(){
     }
 
 
-    student.name = name;
+    let photo =
+        student.photo || "";
 
-    student.className = className;
-
-    student.roll = roll;
-
-    student.parent = parent;
-
-    student.phone = phone;
-
-    student.group = group;
-
-
-    /*
-       Only replace photo if
-       a new photo was selected.
-    */
 
     if(selectedEditPhoto){
 
-        student.photo =
+        photo =
             selectedEditPhoto;
 
     }
+
+
+    const { data, error } =
+        await supabaseClient
+        .from("students")
+        .update({
+
+            name: name,
+            class: className,
+            roll: roll,
+            parent: parent,
+            phone: phone,
+            group: group,
+            photo: photo
+
+        })
+        .eq("id", id)
+        .select()
+        .single();
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE UPDATE ERROR:",
+            error
+        );
+
+        alert(
+            "Could not update student in database."
+        );
+
+        return;
+
+    }
+
+
+    student.name =
+        data.name;
+
+    student.className =
+        data.class;
+
+    student.roll =
+        data.roll;
+
+    student.parent =
+        data.parent;
+
+    student.phone =
+        data.phone;
+
+    student.group =
+        data.group;
+
+    student.photo =
+        data.photo || "";
 
 
     saveAll();
@@ -1364,7 +1987,8 @@ function saveStudentEdit(){
 
     document.getElementById(
         "editStudentBox"
-    ).style.display = "none";
+    ).style.display =
+        "none";
 
 
     renderAll();
@@ -1433,7 +2057,6 @@ font-size:18px;">
 /* =====================================================
    STUDENTS
 ===================================================== */
-
 function renderStudents(){
 
     let table =
@@ -1444,15 +2067,12 @@ function renderStudents(){
     if(!table)
         return;
 
-
     let search =
         document.getElementById(
             "studentSearch"
         ).value.toLowerCase();
 
-
     table.innerHTML = "";
-
 
     let list =
         students.filter(s =>
@@ -1483,7 +2103,6 @@ function renderStudents(){
 
         );
 
-
     if(list.length === 0){
 
         table.innerHTML = `
@@ -1504,7 +2123,6 @@ No students found.
         return;
 
     }
-
 
     list.forEach(s=>{
 
@@ -1530,21 +2148,32 @@ ${studentPhotoHTML(s)}
 
 <td>
 
+<div class="student-menu">
+
 <button
-class="btn"
+class="student-menu-button"
+onclick="toggleStudentMenu(this)">
+⋮
+</button>
+
+<div class="student-menu-dropdown">
+
+<button
 onclick="editStudent(${s.id})">
-
-✏️ Edit
-
+✏️
+<span>Edit Student</span>
 </button>
 
 <button
-class="btn red"
+class="delete-option"
 onclick="deleteStudent(${s.id})">
-
-Delete
-
+🗑️
+<span>Delete Student</span>
 </button>
+
+</div>
+
+</div>
 
 </td>
 
@@ -1556,61 +2185,152 @@ Delete
 
 }
 
-
 /* =====================================================
    DELETE STUDENT
 ===================================================== */
-
-function deleteStudent(id){
+async function deleteStudent(id){
 
     if(!confirm(
-        "Delete this student and their records?"
+        "⚠️ Delete this student and all their records?\n\n" +
+        "This will delete the student from the cloud database along with their attendance, fees and results."
     ))
         return;
 
 
-    students =
-        students.filter(
-            s => s.id !== id
-        );
+    try{
+
+        /* =========================
+           DELETE RESULTS
+        ========================= */
+
+        let response =
+            await supabaseClient
+            .from("results")
+            .delete()
+            .eq("student_id", id);
+
+        if(response.error)
+            throw response.error;
 
 
-    Object.keys(attendance)
-    .forEach(date=>{
+        /* =========================
+           DELETE ATTENDANCE
+        ========================= */
 
-        if(attendance[date]){
-            delete attendance[date][id];
+        response =
+            await supabaseClient
+            .from("attendance")
+            .delete()
+            .eq("student_id", id);
+
+        if(response.error)
+            throw response.error;
+
+
+        /* =========================
+           DELETE FEES
+        ========================= */
+
+        response =
+            await supabaseClient
+            .from("fees")
+            .delete()
+            .eq("student_id", id);
+
+        if(response.error)
+            throw response.error;
+
+
+        /* =========================
+           DELETE STUDENT
+        ========================= */
+
+        response =
+            await supabaseClient
+            .from("students")
+            .delete()
+            .eq("id", id);
+
+        if(response.error)
+            throw response.error;
+
+
+        /* =========================
+           UPDATE LOCAL DATA
+        ========================= */
+
+        students =
+            students.filter(
+                s => s.id !== id
+            );
+
+
+        Object.keys(attendance)
+        .forEach(date => {
+
+            if(attendance[date]){
+
+                delete attendance[date][id];
+
+            }
+
+        });
+
+
+        fees =
+            fees.filter(
+                f => f.studentId !== id
+            );
+
+
+        Object.keys(results)
+        .forEach(examId => {
+
+            if(results[examId]){
+
+                delete results[examId][id];
+
+            }
+
+        });
+
+
+        if(
+            selectedHistoryStudentId === id
+        ){
+
+            selectedHistoryStudentId =
+                null;
+
         }
 
-    });
+
+        saveAll();
+
+        renderAll();
 
 
-    fees =
-        fees.filter(
-            f => f.studentId !== id
+        alert(
+            "✅ Student and all records deleted successfully."
         );
-
-
-    Object.keys(results)
-    .forEach(examId=>{
-
-        if(results[examId]){
-            delete results[examId][id];
-        }
-
-    });
-
-
-    if(selectedHistoryStudentId === id){
-
-        selectedHistoryStudentId = null;
 
     }
 
 
-    saveAll();
+    catch(error){
 
-    renderAll();
+        console.error(
+            "DELETE STUDENT ERROR:",
+            error
+        );
+
+
+        alert(
+            "❌ Could not delete student from cloud.\n\n" +
+            error.message
+        );
+
+    }
 
 }
 
@@ -1763,7 +2483,7 @@ ${buttonText}
    TOGGLE ATTENDANCE
 ===================================================== */
 
-function toggleAttendance(
+async function toggleAttendance(
     id,
     date
 ){
@@ -1776,21 +2496,116 @@ function toggleAttendance(
         attendance[date][id];
 
 
+    let newStatus;
+
+
     if(current === "present"){
 
-        attendance[date][id] = "absent";
+        newStatus = "absent";
 
     }
     else{
 
-        attendance[date][id] = "present";
+        newStatus = "present";
 
     }
 
 
-    saveAll();
+    const { data: existing, error: findError } =
+        await supabaseClient
+        .from("attendance")
+        .select("*")
+        .eq("student_id", id)
+        .eq("date", date)
+        .maybeSingle();
+
+
+    if(findError){
+
+        console.error(
+            "ATTENDANCE FIND ERROR:",
+            findError
+        );
+
+        alert(
+            "Could not check attendance."
+        );
+
+        return;
+
+    }
+
+
+    if(existing){
+
+        const { error } =
+            await supabaseClient
+            .from("attendance")
+            .update({
+
+                status: newStatus
+
+            })
+            .eq("id", existing.id);
+
+
+        if(error){
+
+            console.error(
+                "ATTENDANCE UPDATE ERROR:",
+                error
+            );
+
+            alert(
+                "Could not update attendance."
+            );
+
+            return;
+
+        }
+
+    }
+    else{
+
+        const { error } =
+            await supabaseClient
+            .from("attendance")
+            .insert({
+
+                student_id: id,
+                date: date,
+                status: newStatus
+
+            });
+
+
+        if(error){
+
+            console.error(
+                "ATTENDANCE INSERT ERROR:",
+                error
+            );
+
+            alert(
+                "Could not save attendance."
+            );
+
+            return;
+
+        }
+
+    }
+
+
+    // Update local memory after Supabase succeeds
+
+    attendance[date][id] =
+        newStatus;
+
 
     renderAttendance();
+
+    renderMonthlyAttendance();
 
     renderDashboard();
 
@@ -1944,7 +2759,7 @@ ${escapeHTML(s.name)} - Group ${escapeHTML(s.group)}
    ADD FEE
 ===================================================== */
 
-function addFee(){
+async function addFee(){
 
     let studentId =
         Number(
@@ -1968,12 +2783,66 @@ function addFee(){
         );
 
 
-    if(!studentId ||
-       !month ||
-       !amount){
+    if(!studentId){
 
         alert(
-            "Select student, month and amount."
+            "Please select a student."
+        );
+
+        return;
+
+    }
+
+
+    if(!month){
+
+        alert(
+            "Please select a month."
+        );
+
+        return;
+
+    }
+
+
+    if(!amount || amount <= 0){
+
+        alert(
+            "Please enter a valid amount."
+        );
+
+        return;
+
+    }
+
+
+    const { data, error } =
+        await supabaseClient
+        .from("fees")
+        .insert({
+
+            student_id: studentId,
+
+            date: today(),
+
+            amount: amount,
+
+            month: month
+
+        })
+        .select()
+        .single();
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE FEE INSERT ERROR:",
+            error
+        );
+
+        alert(
+            "Could not save fee."
         );
 
         return;
@@ -1983,15 +2852,15 @@ function addFee(){
 
     fees.push({
 
-        id: Date.now(),
+        id: data.id,
 
-        studentId: studentId,
+        studentId: data.student_id,
 
-        month: month,
+        month: data.month,
 
-        amount: amount,
+        amount: Number(data.amount),
 
-        paidDate: today()
+        paidDate: data.date
 
     });
 
@@ -1999,25 +2868,242 @@ function addFee(){
     saveAll();
 
 
-    document.getElementById(
-        "feeAmount"
-    ).value = "";
+    renderFees();
 
-
-    renderAll();
+    renderDashboard();
 
 
     alert(
-        "Fee record saved."
+        "Fee recorded successfully."
     );
 
 }
+function searchFeeStudents(){
 
+    let input =
+        document.getElementById(
+            "feeStudentSearch"
+        );
+
+    let container =
+        document.getElementById(
+            "feeStudentSearchResults"
+        );
+
+    let search =
+        input.value
+        .trim()
+        .toLowerCase();
+
+    if(!search){
+
+        container.innerHTML = "";
+
+        return;
+    }
+
+
+    let matches =
+        students.filter(student => {
+
+            let name =
+                String(student.name || "")
+                .toLowerCase();
+
+            let roll =
+                String(student.roll || "")
+                .toLowerCase();
+
+            let className =
+                String(student.className || "")
+                .toLowerCase();
+
+            let group =
+                String(student.group || "")
+                .toLowerCase();
+
+            return (
+                name.includes(search) ||
+                roll.includes(search) ||
+                className.includes(search) ||
+                group.includes(search)
+            );
+
+        });
+
+
+    if(matches.length === 0){
+
+        container.innerHTML = `
+            <div class="fee-search-empty">
+                ❌ No student found.
+            </div>
+        `;
+
+        return;
+    }
+
+
+    let displayMatches =
+        matches.slice(0, 30);
+
+    container.innerHTML = "";
+
+
+    displayMatches.forEach(student => {
+
+        let item =
+            document.createElement("div");
+
+        item.className =
+            "fee-student-result";
+
+
+        let photoHTML =
+            student.photo
+            ? `
+                <img
+                src="${student.photo}"
+                alt="${escapeHTML(student.name)}">
+              `
+            : `
+                <div class="fee-student-avatar">
+                    👤
+                </div>
+              `;
+
+
+        item.innerHTML = `
+
+            ${photoHTML}
+
+            <div class="fee-student-info">
+
+                <strong>
+                    ${escapeHTML(student.name)}
+                </strong>
+
+                <span>
+                    Class ${escapeHTML(student.className)}
+                    &nbsp; • &nbsp;
+                    Roll ${escapeHTML(student.roll)}
+                    &nbsp; • &nbsp;
+                    Group ${escapeHTML(student.group)}
+                </span>
+
+            </div>
+
+        `;
+
+
+        item.onclick = function(){
+
+            selectFeeStudent(
+                student.id
+            );
+
+        };
+
+
+        container.appendChild(item);
+
+    });
+
+
+    if(matches.length > 30){
+
+        let more =
+            document.createElement("div");
+
+        more.className =
+            "fee-search-empty";
+
+        more.innerText =
+            "Showing first 30 matches. Refine your search.";
+
+        container.appendChild(more);
+
+    }
+
+}
+function selectFeeStudent(id){
+
+    let student =
+        students.find(
+            s => s.id === id
+        );
+
+    if(!student)
+        return;
+
+
+    /*
+       Set the original hidden select.
+       Your existing addFee() can continue
+       using feeStudent.value normally.
+    */
+
+    let select =
+        document.getElementById(
+            "feeStudent"
+        );
+
+
+    select.value =
+        String(id);
+
+
+    /*
+       Show selected student
+    */
+
+    let selected =
+        document.getElementById(
+            "feeSelectedStudent"
+        );
+
+
+    selected.style.display =
+        "block";
+
+
+    selected.innerHTML = `
+
+        <span>
+            👤 Selected:
+        </span>
+
+        <strong>
+            ${escapeHTML(student.name)}
+        </strong>
+
+        <span>
+            — Class ${escapeHTML(student.className)}
+            • Roll ${escapeHTML(student.roll)}
+            • Group ${escapeHTML(student.group)}
+        </span>
+
+    `;
+
+
+    /*
+       Clear search results
+    */
+
+    document.getElementById(
+        "feeStudentSearch"
+    ).value = "";
+
+
+    document.getElementById(
+        "feeStudentSearchResults"
+    ).innerHTML = "";
+
+}
 
 /* =====================================================
    RENDER FEES
 ===================================================== */
-
 function renderFees(){
 
     let table =
@@ -2025,9 +3111,7 @@ function renderFees(){
             "feeTable"
         );
 
-
     table.innerHTML = "";
-
 
     fees
     .slice()
@@ -2039,10 +3123,8 @@ function renderFees(){
                 s => s.id === f.studentId
             );
 
-
         if(!student)
             return;
-
 
         table.innerHTML += `
 
@@ -2066,13 +3148,32 @@ PAID
 
 <td>
 
+<div class="fee-menu">
+
 <button
-class="btn red"
-onclick="deleteFee(${f.id})">
-
-Delete
-
+class="fee-menu-button"
+onclick="toggleFeeMenu(this)">
+⋮
 </button>
+
+<div class="fee-menu-dropdown">
+
+<button
+onclick="editFee(${f.id})">
+✏️
+<span>Edit Fee</span>
+</button>
+
+<button
+class="delete-option"
+onclick="deleteFee(${f.id})">
+🗑️
+<span>Delete Fee</span>
+</button>
+
+</div>
+
+</div>
 
 </td>
 
@@ -2089,12 +3190,29 @@ Delete
    DELETE FEE
 ===================================================== */
 
-function deleteFee(id){
+async function deleteFee(id){
 
-    if(!confirm(
-        "Delete this fee record?"
-    ))
+    const { error } =
+        await supabaseClient
+        .from("fees")
+        .delete()
+        .eq("id", id);
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE FEE DELETE ERROR:",
+            error
+        );
+
+        alert(
+            "Could not delete fee."
+        );
+
         return;
+
+    }
 
 
     fees =
@@ -2105,7 +3223,15 @@ function deleteFee(id){
 
     saveAll();
 
-    renderAll();
+
+    renderFees();
+
+    renderDashboard();
+
+
+    alert(
+        "Fee deleted."
+    );
 
 }
 
@@ -2114,7 +3240,7 @@ function deleteFee(id){
    CREATE EXAM
 ===================================================== */
 
-function createExam(){
+async function createExam(){
 
     let name =
         document.getElementById(
@@ -2128,10 +3254,10 @@ function createExam(){
         ).value;
 
 
-    if(!name || !date){
+    if(!name){
 
         alert(
-            "Enter exam name and date."
+            "Please enter exam name."
         );
 
         return;
@@ -2139,20 +3265,56 @@ function createExam(){
     }
 
 
-    let exam = {
+    if(!date){
 
-        id: Date.now(),
+        alert(
+            "Please select exam date."
+        );
 
-        name: name,
+        return;
 
-        date: date
-
-    };
+    }
 
 
-    exams.push(exam);
+    const { data, error } =
+        await supabaseClient
+        .from("exams")
+        .insert({
 
-    results[exam.id] = {};
+            exam_name: name,
+
+            date: date
+
+        })
+        .select()
+        .single();
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE EXAM INSERT ERROR:",
+            error
+        );
+
+        alert(
+            "Could not save exam."
+        );
+
+        return;
+
+    }
+
+
+    exams.push({
+
+        id: data.id,
+
+        name: data.exam_name,
+
+        date: data.date
+
+    });
 
 
     saveAll();
@@ -2163,11 +3325,16 @@ function createExam(){
     ).value = "";
 
 
-    renderAll();
+    document.getElementById(
+        "examDate"
+    ).value = "";
+
+
+    renderExamSelect();
 
 
     alert(
-        "Exam created."
+        "Exam created successfully."
     );
 
 }
@@ -2177,7 +3344,7 @@ function createExam(){
    DELETE EXAM
 ===================================================== */
 
-function deleteExam(){
+async function deleteExam(){
 
     let select =
         document.getElementById(
@@ -2185,14 +3352,14 @@ function deleteExam(){
         );
 
 
-    let examId =
+    let id =
         Number(select.value);
 
 
-    if(!examId){
+    if(!id){
 
         alert(
-            "Please select an exam first."
+            "Please select an exam to delete."
         );
 
         return;
@@ -2200,47 +3367,43 @@ function deleteExam(){
     }
 
 
-    let exam =
-        exams.find(
-            e => e.id === examId
+    const { error } =
+        await supabaseClient
+        .from("exams")
+        .delete()
+        .eq("id", id);
+
+
+    if(error){
+
+        console.error(
+            "SUPABASE EXAM DELETE ERROR:",
+            error
         );
 
-
-    if(!exam){
-
         alert(
-            "Exam not found."
+            "Could not delete exam:\n" +
+            error.message
         );
 
         return;
 
     }
-
-
-    let confirmed =
-        confirm(
-            "Delete exam '" +
-            exam.name +
-            "' and ALL marks belonging to this exam?"
-        );
-
-
-    if(!confirmed)
-        return;
 
 
     exams =
         exams.filter(
-            e => e.id !== examId
+            exam => exam.id !== id
         );
 
 
-    delete results[examId];
+    delete results[id];
 
 
     saveAll();
 
-    renderAll();
+
+    renderExamSelect();
 
 
     alert(
@@ -2282,7 +3445,7 @@ No exams created
     }
 
 
-    exams.forEach(exam=>{
+    exams.forEach(exam => {
 
         select.innerHTML += `
 
@@ -2317,7 +3480,75 @@ function selectResultGroup(group){
 /* =====================================================
    RESULTS
 ===================================================== */
+let resultsView = "summary";
 
+let resultSearchText = "";
+
+let selectedResultStudentId = null;
+function setResultsView(view){
+
+    resultsView = view;
+
+    document
+        .getElementById("resultSummaryBtn")
+        .classList.toggle(
+            "active",
+            view === "summary"
+        );
+
+    document
+        .getElementById("resultEntryBtn")
+        .classList.toggle(
+            "active",
+            view === "entry"
+        );
+
+    selectedResultStudentId = null;
+
+    renderResults();
+}
+
+
+function searchResultStudents(){
+
+    resultSearchText =
+        document
+        .getElementById("resultStudentSearch")
+        .value
+        .trim()
+        .toLowerCase();
+
+    renderResults();
+}
+
+
+function getResultStudents(){
+
+    let list =
+        students.filter(
+            s => s.group === resultGroup
+        );
+
+    if(!resultSearchText)
+        return list;
+
+    return list.filter(s => {
+
+        let name =
+            String(s.name || "")
+            .toLowerCase();
+
+        let roll =
+            String(s.roll || "")
+            .toLowerCase();
+
+        return (
+            name.includes(resultSearchText) ||
+            roll.includes(resultSearchText)
+        );
+
+    });
+}
 function renderResults(){
 
     let table =
@@ -2325,132 +3556,261 @@ function renderResults(){
             "resultsTable"
         );
 
+    let head =
+        document.getElementById(
+            "resultsTableHead"
+        );
 
     table.innerHTML = "";
-
+    head.innerHTML = "";
 
     let select =
         document.getElementById(
             "examSelect"
         );
 
-
     let examId =
         Number(select.value);
 
-
     if(!examId){
 
-        table.innerHTML = `
-
+        head.innerHTML = `
 <tr>
-
-<td colspan="9"
-class="empty">
-
-Create an exam first.
-
-</td>
-
+<th>Student</th>
+<th>Total</th>
+<th>%</th>
+<th>Grade</th>
+<th>Result</th>
 </tr>
+`;
 
+        table.innerHTML = `
+<tr>
+<td colspan="5" class="empty">
+Create an exam first.
+</td>
+</tr>
 `;
 
         return;
-
     }
-
 
     if(!results[examId])
         results[examId] = {};
 
-
     let list =
-        students.filter(
-            s => s.group === resultGroup
-        );
-
+        getResultStudents();
 
     if(list.length === 0){
 
-        table.innerHTML = `
-
+        head.innerHTML = `
 <tr>
-
-<td colspan="9"
-class="empty">
-
-No students in this group.
-
-</td>
-
+<th>Student</th>
+<th>Total</th>
+<th>%</th>
+<th>Grade</th>
+<th>Result</th>
 </tr>
+`;
 
+        table.innerHTML = `
+<tr>
+<td colspan="5" class="empty">
+No students found.
+</td>
+</tr>
 `;
 
         return;
-
     }
 
 
-    list.forEach(s=>{
+    /* =========================================
+       STUDENT DETAIL VIEW
+    ========================================= */
+
+    if(selectedResultStudentId){
+
+        renderResultStudentDetail(
+            examId,
+            selectedResultStudentId
+        );
+
+        return;
+    }
+
+
+    /* =========================================
+       SUMMARY VIEW
+    ========================================= */
+
+    if(resultsView === "summary"){
+
+        head.innerHTML = `
+<tr>
+<th>Student</th>
+<th>Total /100</th>
+<th>%</th>
+<th>Grade</th>
+<th>Result</th>
+</tr>
+`;
+
+        list.forEach(s => {
+
+            if(!results[examId][s.id]){
+
+                results[examId][s.id] = {
+                    english: 0,
+                    nepali: 0,
+                    math: 0,
+                    science: 0
+                };
+
+            }
+
+            let r =
+                results[examId][s.id];
+
+            let total =
+                Number(r.english || 0) +
+                Number(r.nepali || 0) +
+                Number(r.math || 0) +
+                Number(r.science || 0);
+
+            let percentage =
+                total;
+
+            let grade =
+                getGrade(percentage);
+
+            let pass =
+                Number(r.english || 0) >= 10 &&
+                Number(r.nepali || 0) >= 10 &&
+                Number(r.math || 0) >= 10 &&
+                Number(r.science || 0) >= 10;
+
+            let row =
+                document.createElement("tr");
+
+            row.innerHTML = `
+
+<td>
+    <div
+        class="result-student-summary"
+        onclick="openResultStudent(${s.id})">
+
+        ${studentPhotoHTML(s)}
+
+        <div>
+            <b>
+                ${escapeHTML(s.name)}
+            </b>
+
+            <small>
+                Roll ${escapeHTML(s.roll)}
+            </small>
+        </div>
+
+    </div>
+</td>
+
+<td>
+    <b>${total}/100</b>
+</td>
+
+<td>
+    ${percentage.toFixed(1)}%
+</td>
+
+<td class="${
+    grade === "F"
+    ? "grade-fail"
+    : "grade-good"
+}">
+    <b>${grade}</b>
+</td>
+
+<td class="${
+    pass
+    ? "present"
+    : "absent"
+}">
+    ${pass ? "PASS" : "FAIL"}
+</td>
+
+`;
+
+            table.appendChild(row);
+
+        });
+
+        return;
+    }
+
+
+    /* =========================================
+       ENTER MARKS VIEW
+    ========================================= */
+
+    head.innerHTML = `
+<tr>
+<th>Student</th>
+<th>English /25</th>
+<th>Nepali /25</th>
+<th>Math /25</th>
+<th>Science /25</th>
+<th>Total /100</th>
+<th>%</th>
+<th>Grade</th>
+<th>Result</th>
+</tr>
+`;
+
+    list.forEach(s => {
 
         if(!results[examId][s.id]){
 
             results[examId][s.id] = {
-
                 english: 0,
                 nepali: 0,
                 math: 0,
                 science: 0
-
             };
 
         }
 
-
         let r =
             results[examId][s.id];
 
-
         let total =
-
             Number(r.english || 0) +
             Number(r.nepali || 0) +
             Number(r.math || 0) +
             Number(r.science || 0);
 
-
-        let percentage = total;
-
+        let percentage =
+            total;
 
         let grade =
             getGrade(percentage);
 
-
         let pass =
-
             Number(r.english || 0) >= 10 &&
             Number(r.nepali || 0) >= 10 &&
             Number(r.math || 0) >= 10 &&
             Number(r.science || 0) >= 10;
-
 
         table.innerHTML += `
 
 <tr data-student-id="${s.id}">
 
 <td>
-
 ${studentPhotoHTML(s)}
-
 <b>${escapeHTML(s.name)}</b>
-
 </td>
 
-
 <td>
-
 <input
 class="marks-input"
 type="number"
@@ -2465,12 +3825,9 @@ ${s.id},
 this.value,
 this
 )">
-
 </td>
 
-
 <td>
-
 <input
 class="marks-input"
 type="number"
@@ -2485,12 +3842,9 @@ ${s.id},
 this.value,
 this
 )">
-
 </td>
 
-
 <td>
-
 <input
 class="marks-input"
 type="number"
@@ -2505,12 +3859,9 @@ ${s.id},
 this.value,
 this
 )">
-
 </td>
 
-
 <td>
-
 <input
 class="marks-input"
 type="number"
@@ -2525,46 +3876,335 @@ ${s.id},
 this.value,
 this
 )">
-
 </td>
-
 
 <td>
 <b>${total}/100</b>
 </td>
 
-
 <td>
 ${percentage.toFixed(1)}%
 </td>
-
 
 <td class="${
     grade === "F"
     ? "grade-fail"
     : "grade-good"
 }">
-
 <b>${grade}</b>
-
 </td>
-
 
 <td class="${
     pass
     ? "present"
     : "absent"
 }">
-
 ${pass ? "PASS" : "FAIL"}
-
 </td>
 
+</tr>
+`;
+
+    });
+
+}
+function openResultStudent(studentId){
+
+    selectedResultStudentId =
+        studentId;
+
+    renderResults();
+}
+
+
+function renderResultStudentDetail(
+    examId,
+    studentId
+){
+
+    let table =
+        document.getElementById(
+            "resultsTable"
+        );
+
+    let head =
+        document.getElementById(
+            "resultsTableHead"
+        );
+
+    let student =
+        students.find(
+            s => s.id === studentId
+        );
+
+    if(!student){
+        selectedResultStudentId = null;
+        renderResults();
+        return;
+    }
+
+    if(!results[examId][studentId]){
+
+        results[examId][studentId] = {
+            english: 0,
+            nepali: 0,
+            math: 0,
+            science: 0
+        };
+
+    }
+
+    let r =
+        results[examId][studentId];
+
+    let total =
+        Number(r.english || 0) +
+        Number(r.nepali || 0) +
+        Number(r.math || 0) +
+        Number(r.science || 0);
+
+    let percentage =
+        total;
+
+    let grade =
+        getGrade(percentage);
+
+    let pass =
+        Number(r.english || 0) >= 10 &&
+        Number(r.nepali || 0) >= 10 &&
+        Number(r.math || 0) >= 10 &&
+        Number(r.science || 0) >= 10;
+
+
+    head.innerHTML = `
+<tr>
+<th colspan="2">
+    Student Result
+</th>
+</tr>
+`;
+
+
+    table.innerHTML = `
+
+<tr>
+<td colspan="2">
+
+<div class="result-detail-header">
+
+    <button
+        class="result-back-button"
+        onclick="closeResultStudentDetail()">
+        ← Back
+    </button>
+
+    <div class="result-detail-student">
+
+        ${studentPhotoHTML(student)}
+
+        <div>
+
+            <h3>
+                ${escapeHTML(student.name)}
+            </h3>
+
+            <p>
+                Class ${escapeHTML(student.className)}
+                • Roll ${escapeHTML(student.roll)}
+                • Group ${escapeHTML(student.group)}
+            </p>
+
+        </div>
+
+    </div>
+
+</div>
+
+</td>
+</tr>
+
+
+<tr>
+<td>
+    English
+</td>
+
+<td>
+<input
+class="marks-input"
+type="number"
+min="0"
+max="25"
+inputmode="numeric"
+value="${r.english}"
+oninput="updateMark(
+${examId},
+${studentId},
+'english',
+this.value,
+this
+)">
+<span>/25</span>
+</td>
+</tr>
+
+
+<tr>
+<td>
+    Nepali
+</td>
+
+<td>
+<input
+class="marks-input"
+type="number"
+min="0"
+max="25"
+inputmode="numeric"
+value="${r.nepali}"
+oninput="updateMark(
+${examId},
+${studentId},
+'nepali',
+this.value,
+this
+)">
+<span>/25</span>
+</td>
+</tr>
+
+
+<tr>
+<td>
+    Math
+</td>
+
+<td>
+<input
+class="marks-input"
+type="number"
+min="0"
+max="25"
+inputmode="numeric"
+value="${r.math}"
+oninput="updateMark(
+${examId},
+${studentId},
+'math',
+this.value,
+this
+)">
+<span>/25</span>
+</td>
+</tr>
+
+
+<tr>
+<td>
+    Science
+</td>
+
+<td>
+<input
+class="marks-input"
+type="number"
+min="0"
+max="25"
+inputmode="numeric"
+value="${r.science}"
+oninput="updateMark(
+${examId},
+${studentId},
+'science',
+this.value,
+this
+)">
+<span>/25</span>
+</td>
+</tr>
+
+
+<tr>
+<td>
+    <b>Total</b>
+</td>
+
+<td>
+    <b>${total}/100</b>
+</td>
+</tr>
+
+
+<tr>
+<td>
+    Percentage
+</td>
+
+<td>
+    ${percentage.toFixed(1)}%
+</td>
+</tr>
+
+
+<tr>
+<td>
+    Grade
+</td>
+
+<td class="${
+    grade === "F"
+    ? "grade-fail"
+    : "grade-good"
+}">
+    <b>${grade}</b>
+</td>
+</tr>
+
+
+<tr>
+<td>
+    Result
+</td>
+
+<td class="${
+    pass
+    ? "present"
+    : "absent"
+}">
+    <b>${pass ? "PASS" : "FAIL"}</b>
+</td>
 </tr>
 
 `;
 
-    });
+}
+
+
+function closeResultStudentDetail(){
+
+    selectedResultStudentId =
+        null;
+
+    renderResults();
+
+}
+
+
+function refreshResultDetail(
+    examId,
+    studentId
+){
+
+    if(
+        selectedResultStudentId !==
+        studentId
+    )
+        return;
+
+    renderResultStudentDetail(
+        examId,
+        studentId
+    );
 
 }
 
@@ -2572,8 +4212,7 @@ ${pass ? "PASS" : "FAIL"}
 /* =====================================================
    UPDATE MARK
 ===================================================== */
-
-function updateMark(
+async function updateMark(
     examId,
     studentId,
     subject,
@@ -2621,15 +4260,145 @@ function updateMark(
         mark;
 
 
+    let result =
+        results[examId][studentId];
+
+
+    let total =
+        Number(result.english || 0) +
+        Number(result.nepali || 0) +
+        Number(result.math || 0) +
+        Number(result.science || 0);
+
+
+    result.total =
+        total;
+
+
+    const { data: existing, error: findError } =
+        await supabaseClient
+        .from("results")
+        .select("*")
+        .eq("exam_id", examId)
+        .eq("student_id", studentId)
+        .maybeSingle();
+
+
+    if(findError){
+
+        console.error(
+            "SUPABASE RESULT FIND ERROR:",
+            findError
+        );
+
+        alert(
+            "Could not check result."
+        );
+
+        return;
+
+    }
+
+
+    let resultData = {
+
+        english:
+            Number(result.english || 0),
+
+        nepali:
+            Number(result.nepali || 0),
+
+        maths:
+            Number(result.math || 0),
+
+        science:
+            Number(result.science || 0),
+
+        total:
+            total
+
+    };
+
+
+    if(existing){
+
+        const { error } =
+            await supabaseClient
+            .from("results")
+            .update(resultData)
+            .eq("id", existing.id);
+
+
+        if(error){
+
+            console.error(
+                "SUPABASE RESULT UPDATE ERROR:",
+                error
+            );
+
+            alert(
+                "Could not update result."
+            );
+
+            return;
+
+        }
+
+    }
+    else{
+
+        const { error } =
+            await supabaseClient
+            .from("results")
+            .insert({
+
+                student_id: studentId,
+
+                exam_id: examId,
+
+                ...resultData
+
+            });
+
+
+        if(error){
+
+            console.error(
+                "SUPABASE RESULT INSERT ERROR:",
+                error
+            );
+
+            alert(
+                "Could not save result."
+            );
+
+            return;
+
+        }
+
+    }
+
+
     saveAll();
 
 
+    if(
+    selectedResultStudentId === studentId
+){
+    refreshResultDetail(
+        examId,
+        studentId
+    );
+}
+else{
     updateResultRow(
         examId,
         studentId
     );
-
 }
+}
+
+
 
 
 /* =====================================================
@@ -3249,9 +5018,57 @@ ${pass ? "PASS" : "FAIL"}
     });
 
 
-    /* DISPLAY */
+   /* SUMMARY */
 
-    content.innerHTML = `
+let totalFees =
+    fees
+    .filter(
+        f => f.studentId === id
+    )
+    .reduce(
+        (sum, f) =>
+            sum + Number(f.amount || 0),
+        0
+    );
+
+
+let examsTaken = 0;
+let percentageTotal = 0;
+
+
+exams.forEach(exam => {
+
+    let r =
+        results[exam.id]
+        ? results[exam.id][id]
+        : null;
+
+    if(!r)
+        return;
+
+    let total =
+
+        Number(r.english || 0) +
+        Number(r.nepali || 0) +
+        Number(r.math || 0) +
+        Number(r.science || 0);
+
+    examsTaken++;
+
+    percentageTotal += total;
+
+});
+
+
+let averagePercentage =
+    examsTaken === 0
+    ? 0
+    : percentageTotal / examsTaken;
+
+
+/* DISPLAY */
+
+content.innerHTML = `
 
 <div class="panel">
 
@@ -3296,6 +5113,88 @@ Joined:
 ${escapeHTML(student.joined || "Not available")}
 
 </p>
+
+</div>
+
+</div>
+
+</div>
+
+
+<!-- QUICK SUMMARY -->
+
+<div class="history-summary-grid">
+
+<div class="history-summary-card">
+
+<div class="history-summary-icon">
+📅
+</div>
+
+<div>
+
+<span>Attendance</span>
+
+<strong>
+${attendancePercent.toFixed(1)}%
+</strong>
+
+</div>
+
+</div>
+
+
+<div class="history-summary-card">
+
+<div class="history-summary-icon">
+💰
+</div>
+
+<div>
+
+<span>Total Fees</span>
+
+<strong>
+Rs. ${totalFees}
+</strong>
+
+</div>
+
+</div>
+
+
+<div class="history-summary-card">
+
+<div class="history-summary-icon">
+📝
+</div>
+
+<div>
+
+<span>Exams Taken</span>
+
+<strong>
+${examsTaken}
+</strong>
+
+</div>
+
+</div>
+
+
+<div class="history-summary-card">
+
+<div class="history-summary-icon">
+📊
+</div>
+
+<div>
+
+<span>Average</span>
+
+<strong>
+${averagePercentage.toFixed(1)}%
+</strong>
 
 </div>
 
@@ -3376,7 +5275,6 @@ No attendance recorded.
 </div>
 
 
-
 <div class="panel">
 
 <h3>💰 Fee History</h3>
@@ -3418,7 +5316,6 @@ No fee records.
 </table>
 
 </div>
-
 
 
 <div class="panel">
@@ -3473,7 +5370,6 @@ No exam results.
 /* =====================================================
    DASHBOARD
 ===================================================== */
-
 function renderDashboard(){
 
     document.getElementById(
@@ -3522,8 +5418,11 @@ function renderDashboard(){
         groupCCount;
 
 
-    let date = today();
+    /*
+       Today's attendance
+    */
 
+    let date = today();
 
     let todayData =
         attendance[date] || {};
@@ -3556,6 +5455,136 @@ function renderDashboard(){
     ).innerText =
         absent;
 
+
+    /*
+       Total fees
+    */
+
+    let totalFees =
+        fees.reduce(
+            (sum, fee) =>
+                sum + Number(fee.amount || 0),
+            0
+        );
+
+
+    document.getElementById(
+        "dashboardTotalFees"
+    ).innerText =
+        "Rs. " + totalFees;
+
+
+    /*
+       Total exams
+    */
+
+    document.getElementById(
+        "dashboardTotalExams"
+    ).innerText =
+        exams.length;
+
+
+    /*
+       Overall attendance
+    */
+
+    let overallPresent = 0;
+    let overallAbsent = 0;
+
+
+    Object.values(attendance)
+    .forEach(day => {
+
+        Object.values(day)
+        .forEach(status => {
+
+            if(status === "present")
+                overallPresent++;
+
+            if(status === "absent")
+                overallAbsent++;
+
+        });
+
+    });
+
+
+    let totalAttendance =
+        overallPresent +
+        overallAbsent;
+
+
+    let overallPercentage =
+        totalAttendance === 0
+        ? 0
+        : (
+            overallPresent /
+            totalAttendance
+        ) * 100;
+
+
+    document.getElementById(
+        "dashboardAttendance"
+    ).innerText =
+        overallPercentage.toFixed(1) + "%";
+
+
+    /*
+       Students with records
+    */
+
+    let studentsWithRecords =
+        new Set();
+
+
+    Object.values(attendance)
+    .forEach(day => {
+
+        Object.keys(day)
+        .forEach(studentId => {
+
+            studentsWithRecords.add(
+                Number(studentId)
+            );
+
+        });
+
+    });
+
+
+    fees.forEach(fee => {
+
+        studentsWithRecords.add(
+            Number(fee.studentId)
+        );
+
+    });
+
+
+    Object.values(results)
+    .forEach(examResults => {
+
+        Object.keys(examResults)
+        .forEach(studentId => {
+
+            studentsWithRecords.add(
+                Number(studentId)
+            );
+
+        });
+
+    });
+
+
+    document.getElementById(
+        "dashboardStudentsWithRecords"
+    ).innerText =
+        studentsWithRecords.size;
+
+
+    /*
+       Recent students
+    */
 
     let table =
         document.getElementById(
@@ -3604,97 +5633,175 @@ ${studentPhotoHTML(
 /* =====================================================
    BACKUP
 ===================================================== */
+async function exportData(){
 
-function exportData(){
+    try{
 
-    let backup = {
+        const [
+            studentsResponse,
+            attendanceResponse,
+            feesResponse,
+            examsResponse,
+            resultsResponse,
+            groupsResponse
+        ] = await Promise.all([
 
-        students: students,
+            supabaseClient
+                .from("students")
+                .select("*"),
 
-        attendance: attendance,
+            supabaseClient
+                .from("attendance")
+                .select("*"),
 
-        fees: fees,
+            supabaseClient
+                .from("fees")
+                .select("*"),
 
-        exams: exams,
+            supabaseClient
+                .from("exams")
+                .select("*"),
 
-        results: results,
+            supabaseClient
+                .from("results")
+                .select("*"),
 
-        groups: groups,
+            supabaseClient
+                .from("groups")
+                .select("*")
+                .order("id", { ascending: true })
 
-        backupDate:
-            new Date().toISOString()
-
-    };
+        ]);
 
 
-    let blob =
-        new Blob(
-            [
-                JSON.stringify(
-                    backup,
-                    null,
-                    2
-                )
-            ],
-            {
-                type:"application/json"
-            }
+        if(studentsResponse.error)
+            throw studentsResponse.error;
+
+        if(attendanceResponse.error)
+            throw attendanceResponse.error;
+
+        if(feesResponse.error)
+            throw feesResponse.error;
+
+        if(examsResponse.error)
+            throw examsResponse.error;
+
+        if(resultsResponse.error)
+            throw resultsResponse.error;
+
+        if(groupsResponse.error)
+            throw groupsResponse.error;
+
+
+        let backup = {
+
+            students:
+                studentsResponse.data || [],
+
+            attendance:
+                attendanceResponse.data || [],
+
+            fees:
+                feesResponse.data || [],
+
+            exams:
+                examsResponse.data || [],
+
+            results:
+                resultsResponse.data || [],
+
+            groups:
+                groupsResponse.data || [],
+
+            backupDate:
+                new Date().toISOString()
+
+        };
+
+
+        let blob =
+            new Blob(
+                [
+                    JSON.stringify(
+                        backup,
+                        null,
+                        2
+                    )
+                ],
+                {
+                    type:
+                        "application/json"
+                }
+            );
+
+
+        let url =
+            URL.createObjectURL(blob);
+
+
+        let a =
+            document.createElement("a");
+
+
+        a.href = url;
+
+
+        a.download =
+            "rampur-free-tuition-backup-" +
+            today() +
+            ".json";
+
+
+        a.click();
+
+
+        URL.revokeObjectURL(url);
+
+
+        alert(
+            "Cloud backup downloaded successfully."
         );
 
+    }
 
-    let url =
-        URL.createObjectURL(blob);
+    catch(error){
 
+        console.error(
+            "BACKUP ERROR:",
+            error
+        );
 
-    let a =
-        document.createElement("a");
+        alert(
+            "Could not create backup:\n" +
+            error.message
+        );
 
-
-    a.href = url;
-
-
-    a.download =
-        "rampur-free-tuition-backup-" +
-        today() +
-        ".json";
-
-
-    a.click();
-
-
-    URL.revokeObjectURL(url);
+    }
 
 }
-
 
 /* =====================================================
    IMPORT BACKUP
 ===================================================== */
 
-function importData(){
+async function importData(){
 
     let file =
         document.getElementById(
             "importFile"
         ).files[0];
 
-
     if(!file){
-
         alert(
             "Please select a backup file first."
         );
-
         return;
-
     }
-
 
     let reader =
         new FileReader();
 
-
-    reader.onload = function(e){
+    reader.onload = async function(e){
 
         try{
 
@@ -3703,101 +5810,274 @@ function importData(){
                     e.target.result
                 );
 
-
-            if(!data.students){
+            if(
+                !data ||
+                !Array.isArray(data.students) ||
+                !Array.isArray(data.attendance) ||
+                !Array.isArray(data.fees) ||
+                !Array.isArray(data.exams) ||
+                !Array.isArray(data.results) ||
+                !Array.isArray(data.groups)
+            ){
 
                 alert(
-                    "Invalid backup file."
+                    "Invalid cloud backup file."
                 );
 
                 return;
-
             }
 
 
-            if(!confirm(
-                "This will replace your current data. Continue?"
-            ))
+            let confirmed =
+                confirm(
+                    "⚠️ WARNING!\n\n" +
+                    "This will DELETE your current cloud data and replace it with this backup.\n\n" +
+                    "Students, attendance, fees, exams, results and groups will be replaced.\n\n" +
+                    "Are you absolutely sure?"
+                );
+
+            if(!confirmed)
                 return;
 
 
-            students =
-                data.students || [];
+            /* =========================
+               DELETE OLD DATA
+               ========================= */
+
+            let response =
+                await supabaseClient
+                .from("results")
+                .delete()
+                .not("id", "is", null);
+
+            if(response.error)
+                throw response.error;
 
 
-            attendance =
-                data.attendance || {};
+            response =
+                await supabaseClient
+                .from("attendance")
+                .delete()
+                .not("id", "is", null);
+
+            if(response.error)
+                throw response.error;
 
 
-            fees =
-                data.fees || [];
+            response =
+                await supabaseClient
+                .from("fees")
+                .delete()
+                .not("id", "is", null);
+
+            if(response.error)
+                throw response.error;
 
 
-            exams =
-                data.exams || [];
+            response =
+                await supabaseClient
+                .from("exams")
+                .delete()
+                .not("id", "is", null);
+
+            if(response.error)
+                throw response.error;
 
 
-            results =
-                data.results || {};
+            response =
+                await supabaseClient
+                .from("students")
+                .delete()
+                .not("id", "is", null);
+
+            if(response.error)
+                throw response.error;
 
 
-            /*
-               Older backups may not contain groups.
-            */
+            /* Delete old groups */
+            response =
+                await supabaseClient
+                .from("groups")
+                .delete()
+                .not("id", "is", null);
 
-            groups =
-                data.groups ||
-                ["A","B","C"];
-
-
-            /*
-               Add any student group
-               that isn't already present.
-            */
-
-            students.forEach(s=>{
-
-                if(
-                    s.group &&
-                    !groups.includes(s.group)
-                ){
-
-                    groups.push(s.group);
-
-                }
-
-            });
+            if(response.error)
+                throw response.error;
 
 
-            selectedHistoryStudentId = null;
+            /* =========================
+               RESTORE GROUPS
+               ========================= */
+
+            if(data.groups.length > 0){
+
+                let groupRows =
+                    data.groups.map(group => {
+
+                        /*
+                         * If backup contains full
+                         * Supabase group rows,
+                         * keep only the name.
+                         *
+                         * New IDs will be generated
+                         * automatically.
+                         */
+
+                        return {
+                            name:
+                                typeof group === "string"
+                                    ? group
+                                    : group.name
+                        };
+
+                    });
+
+                response =
+                    await supabaseClient
+                    .from("groups")
+                    .insert(
+                        groupRows
+                    );
+
+                if(response.error)
+                    throw response.error;
+            }
 
 
-            studentGroup =
-                groups[0] || "A";
+            /* =========================
+               RESTORE STUDENTS
+               ========================= */
 
-            attendanceGroup =
-                groups[0] || "A";
+            if(data.students.length > 0){
 
-            resultGroup =
-                groups[0] || "A";
+                response =
+                    await supabaseClient
+                    .from("students")
+                    .insert(
+                        data.students
+                    );
+
+                if(response.error)
+                    throw response.error;
+            }
 
 
-            saveAll();
+            /* =========================
+               RESTORE EXAMS
+               ========================= */
+
+            if(data.exams.length > 0){
+
+                response =
+                    await supabaseClient
+                    .from("exams")
+                    .insert(
+                        data.exams
+                    );
+
+                if(response.error)
+                    throw response.error;
+            }
 
 
-            renderAll();
+            /* =========================
+               RESTORE ATTENDANCE
+               ========================= */
+
+            if(data.attendance.length > 0){
+
+                response =
+                    await supabaseClient
+                    .from("attendance")
+                    .insert(
+                        data.attendance
+                    );
+
+                if(response.error)
+                    throw response.error;
+            }
+
+
+            /* =========================
+               RESTORE FEES
+               ========================= */
+
+            if(data.fees.length > 0){
+
+                response =
+                    await supabaseClient
+                    .from("fees")
+                    .insert(
+                        data.fees
+                    );
+
+                if(response.error)
+                    throw response.error;
+            }
+
+
+            /* =========================
+               RESTORE RESULTS
+               ========================= */
+
+            if(data.results.length > 0){
+
+                response =
+                    await supabaseClient
+                    .from("results")
+                    .insert(
+                        data.results
+                    );
+
+                if(response.error)
+                    throw response.error;
+            }
+
+
+            /* =========================
+               RELOAD EVERYTHING
+               ========================= */
+
+            selectedHistoryStudentId =
+                null;
+
+
+            await loadGroupsFromSupabase();
+
+            await loadStudentsFromSupabase();
+
+            await loadAttendanceFromSupabase();
+
+            await loadFeesFromSupabase();
+
+            await loadExamsFromSupabase();
+
+            await loadResultsFromSupabase();
+
+
+            document.getElementById(
+                "importFile"
+            ).value = "";
 
 
             alert(
-                "Backup restored successfully."
+                "✅ Cloud backup restored successfully!"
             );
 
         }
 
         catch(error){
 
+            console.error(
+                "RESTORE ERROR:",
+                error
+            );
+
             alert(
-                "Could not read the backup file."
+                "❌ Restore failed.\n\n" +
+                error.message +
+                "\n\n" +
+                "Check the browser console for details."
             );
 
         }
@@ -3808,57 +6088,6 @@ function importData(){
     reader.readAsText(file);
 
 }
-
-
-/* =====================================================
-   BACKUP SUMMARY
-===================================================== */
-
-function renderBackup(){
-
-    document.getElementById(
-        "backupStudents"
-    ).innerText =
-        students.length;
-
-
-    let attendanceCount = 0;
-
-
-    Object.values(attendance)
-    .forEach(day=>{
-
-        attendanceCount +=
-            Object.keys(day).length;
-
-    });
-
-
-    document.getElementById(
-        "backupAttendance"
-    ).innerText =
-        attendanceCount;
-
-
-    document.getElementById(
-        "backupFees"
-    ).innerText =
-        fees.length;
-
-
-    document.getElementById(
-        "backupExams"
-    ).innerText =
-        exams.length;
-
-
-    document.getElementById(
-        "backupGroups"
-    ).innerText =
-        groups.length;
-
-}
-
 
 /* =====================================================
    ESCAPE HTML
@@ -3927,7 +6156,7 @@ function renderAll(){
 
     renderDashboard();
 
-    renderBackup();
+    
 
 }
 
@@ -3963,5 +6192,529 @@ document.getElementById(
 ===================================================== */
 
 saveAll();
-
 renderAll();
+async function startApp(){
+
+    await loadGroupsFromSupabase();
+
+    await loadStudentsFromSupabase();
+
+    await loadAttendanceFromSupabase();
+
+    await loadFeesFromSupabase();
+
+    await loadExamsFromSupabase();
+
+    await loadResultsFromSupabase();
+
+}
+
+startApp();
+
+function toggleExamMenu(button){
+
+    let menu =
+        button.parentElement
+        .querySelector(
+            ".exam-menu-dropdown"
+        );
+
+    document
+        .querySelectorAll(
+            ".exam-menu-dropdown"
+        )
+        .forEach(otherMenu => {
+
+            if(otherMenu !== menu){
+                otherMenu.classList.remove(
+                    "show"
+                );
+            }
+
+        });
+
+    menu.classList.toggle("show");
+
+}
+function editSelectedExam(){
+
+    let select =
+        document.getElementById(
+            "examSelect"
+        );
+
+    let examId =
+        Number(select.value);
+
+    if(!examId){
+        alert(
+            "Please select an exam first."
+        );
+        return;
+    }
+
+    let exam =
+        exams.find(
+            e => Number(e.id) === examId
+        );
+
+    if(!exam){
+        alert(
+            "Exam not found."
+        );
+        return;
+    }
+
+    let newName =
+        prompt(
+            "Enter new exam name:",
+            exam.name
+        );
+
+    if(newName === null)
+        return;
+
+    newName =
+        newName.trim();
+
+    if(!newName){
+        alert(
+            "Exam name cannot be empty."
+        );
+        return;
+    }
+
+    let newDate =
+        prompt(
+            "Enter exam date (YYYY-MM-DD):",
+            exam.date || ""
+        );
+
+    if(newDate === null)
+        return;
+
+    newDate =
+        newDate.trim();
+
+    if(!newDate){
+        alert(
+            "Exam date cannot be empty."
+        );
+        return;
+    }
+
+    editExamInSupabase(
+        examId,
+        newName,
+        newDate
+    );
+
+}
+async function editExamInSupabase(
+    examId,
+    newName,
+    newDate
+){
+
+    const { error } =
+        await supabaseClient
+        .from("exams")
+        .update({
+            exam_name: newName,
+            date: newDate
+        })
+        .eq("id", examId);
+
+    if(error){
+
+        console.error(
+            "SUPABASE EXAM UPDATE ERROR:",
+            error
+        );
+
+        alert(
+            "Could not update exam:\n" +
+            error.message
+        );
+
+        return;
+    }
+
+    let exam =
+        exams.find(
+            e => Number(e.id) === examId
+        );
+
+    if(exam){
+
+        exam.name =
+            newName;
+
+        exam.date =
+            newDate;
+
+    }
+
+    renderExamSelect();
+
+    renderResults();
+
+    alert(
+        "✅ Exam updated successfully."
+    );
+
+}
+function deleteSelectedExam(){
+
+    let select =
+        document.getElementById(
+            "examSelect"
+        );
+
+    let examId =
+        Number(select.value);
+
+    if(!examId){
+        alert(
+            "Please select an exam first."
+        );
+        return;
+    }
+
+    deleteExamById(examId);
+
+}
+async function deleteExamById(id){
+
+    let exam =
+        exams.find(
+            e => Number(e.id) === Number(id)
+        );
+
+    if(!exam){
+        alert(
+            "Exam not found."
+        );
+        return;
+    }
+
+    let confirmed =
+        confirm(
+            "⚠️ Delete this exam?\n\n" +
+            "Exam: " + exam.name + "\n\n" +
+            "All student marks/results for this exam will also be permanently deleted.\n\n" +
+            "This action cannot be undone.\n\n" +
+            "Are you sure?"
+        );
+
+    if(!confirmed)
+        return;
+
+
+    // First delete all results belonging to this exam
+    let response =
+        await supabaseClient
+        .from("results")
+        .delete()
+        .eq("exam_id", id);
+
+
+    if(response.error){
+
+        console.error(
+            "SUPABASE RESULT DELETE ERROR:",
+            response.error
+        );
+
+        alert(
+            "Could not delete exam results:\n" +
+            response.error.message
+        );
+
+        return;
+    }
+
+
+    // Now delete the exam itself
+    response =
+        await supabaseClient
+        .from("exams")
+        .delete()
+        .eq("id", id);
+
+
+    if(response.error){
+
+        console.error(
+            "SUPABASE EXAM DELETE ERROR:",
+            response.error
+        );
+
+        alert(
+            "Could not delete exam:\n" +
+            response.error.message
+        );
+
+        return;
+    }
+
+
+    // Update local data
+    exams =
+        exams.filter(
+            exam =>
+                Number(exam.id) !== Number(id)
+        );
+
+
+    delete results[id];
+
+
+    saveAll();
+
+    renderExamSelect();
+
+    renderResults();
+
+
+    alert(
+        "✅ Exam and all its results were deleted successfully."
+    );
+
+}
+document.addEventListener(
+    "click",
+    function(event){
+
+        if(
+            !event.target.closest(
+                ".exam-menu"
+            )
+        ){
+
+            document
+                .querySelectorAll(
+                    ".exam-menu-dropdown"
+                )
+                .forEach(menu => {
+
+                    menu.classList.remove(
+                        "show"
+                    );
+
+                });
+
+        }
+
+    }
+);
+function toggleStudentMenu(button){
+
+    let menu =
+        button.parentElement
+        .querySelector(
+            ".student-menu-dropdown"
+        );
+
+    document
+        .querySelectorAll(
+            ".student-menu-dropdown"
+        )
+        .forEach(otherMenu => {
+
+            if(otherMenu !== menu){
+                otherMenu.classList.remove(
+                    "show"
+                );
+            }
+
+        });
+
+    menu.classList.toggle("show");
+
+}
+document.addEventListener(
+    "click",
+    function(event){
+
+        if(
+            !event.target.closest(
+                ".student-menu"
+            )
+        ){
+
+            document
+                .querySelectorAll(
+                    ".student-menu-dropdown"
+                )
+                .forEach(menu => {
+
+                    menu.classList.remove(
+                        "show"
+                    );
+
+                });
+
+        }
+
+    }
+);
+function toggleFeeMenu(button){
+
+    let menu =
+        button.parentElement
+        .querySelector(
+            ".fee-menu-dropdown"
+        );
+
+    document
+        .querySelectorAll(
+            ".fee-menu-dropdown"
+        )
+        .forEach(otherMenu => {
+
+            if(otherMenu !== menu){
+                otherMenu.classList.remove(
+                    "show"
+                );
+            }
+
+        });
+
+    menu.classList.toggle("show");
+
+}
+document.addEventListener(
+    "click",
+    function(event){
+
+        if(
+            !event.target.closest(
+                ".fee-menu"
+            )
+        ){
+
+            document
+                .querySelectorAll(
+                    ".fee-menu-dropdown"
+                )
+                .forEach(menu => {
+
+                    menu.classList.remove(
+                        "show"
+                    );
+
+                });
+
+        }
+
+    }
+);
+async function editFee(id){
+
+    let fee =
+        fees.find(
+            f => Number(f.id) === Number(id)
+        );
+
+    if(!fee){
+        alert("Fee record not found.");
+        return;
+    }
+
+    let newMonth =
+        prompt(
+            "Enter fee month (YYYY-MM):",
+            fee.month
+        );
+
+    if(newMonth === null)
+        return;
+
+    newMonth =
+        newMonth.trim();
+
+    if(!newMonth){
+        alert("Month cannot be empty.");
+        return;
+    }
+
+    let newAmount =
+        prompt(
+            "Enter fee amount:",
+            fee.amount
+        );
+
+    if(newAmount === null)
+        return;
+
+    newAmount =
+        newAmount.trim();
+
+    if(!newAmount){
+        alert("Amount cannot be empty.");
+        return;
+    }
+
+    let amount =
+        Number(newAmount);
+
+    if(
+        !Number.isFinite(amount) ||
+        amount < 0
+    ){
+        alert("Please enter a valid amount.");
+        return;
+    }
+
+    const { error } =
+        await supabaseClient
+        .from("fees")
+        .update({
+            month: newMonth,
+            amount: amount
+        })
+        .eq("id", id);
+
+    if(error){
+
+        console.error(
+            "SUPABASE FEE UPDATE ERROR:",
+            error
+        );
+
+        alert(
+            "Could not update fee:\n" +
+            error.message
+        );
+
+        return;
+    }
+
+    fee.month =
+        newMonth;
+
+    fee.amount =
+        amount;
+
+    renderFees();
+
+    alert(
+        "✅ Fee updated successfully."
+    );
+
+}
+window.addEventListener("load", function(){
+
+    setTimeout(function(){
+
+        const splash =
+            document.getElementById("appSplash");
+
+        if(splash){
+            splash.remove();
+        }
+
+    }, 2100);
+
+});
