@@ -6683,10 +6683,12 @@ document.getElementById(
 saveAll();
 renderAll();
 async function startApp(){
+   console.log("START APP: beginning");
 
     try{
 
         await openOfflineDatabase();
+       console.log("START APP: offline database finished");
 
     }
     catch(error){
