@@ -1,4 +1,4 @@
-const CACHE_NAME = "rampur-tuition-v1";
+const CACHE_NAME = "rampur-tuition-v2";
 
 const FILES_TO_CACHE = [
     "./",
