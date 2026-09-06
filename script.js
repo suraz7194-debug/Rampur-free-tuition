@@ -7222,7 +7222,7 @@ window.addEventListener("load", function(){
    OFFLINE DATABASE — INDEXEDDB
 ===================================================== */
 
-const OFFLINE_DB_NAME = "RampurFreeTuitionOffline";
+const OFFLINE_DB_NAME = "RampurFreeTuitionOfflinev2";
 const OFFLINE_DB_VERSION = 2;
 
 let offlineDB = null;
