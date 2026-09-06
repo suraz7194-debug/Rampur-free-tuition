@@ -9,15 +9,35 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <title>Rampur Free Tuition Center</title>
-  
-  <link rel="stylesheet" href="style.css">
-  
+
+<link rel="stylesheet" href="style.css">
+
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    
   
 </head>
 
 <body>
+  <!-- App Opening Splash -->
+<div id="appSplash">
+
+    <div class="splash-content">
+
+        <img
+            src="./icons/icon-512.png"
+            alt="Rampur Free Tuition Center"
+            class="splash-logo">
+
+        <h1>
+            Rampur Free Tuition Center
+        </h1>
+
+        <p>
+            Student Management System
+        </p>
+
+    </div>
+
+</div>
   
   <div id="loginScreen" style="
     position:fixed;
@@ -85,36 +105,44 @@
 <nav>
 
 <button class="active" onclick="showSection('dashboard',this)">
-Dashboard
+🏠
+<span>Dashboard</span>
 </button>
 
 <button onclick="showSection('students',this)">
-Students
+👨‍🎓
+<span>Students</span>
 </button>
 
 <button onclick="showSection('attendance',this)">
-Attendance
+📋
+<span>Attendance</span>
 </button>
 
 <button onclick="showSection('fees',this)">
-Fees
+💰
+<span>Fees</span>
 </button>
 
 <button onclick="showSection('results',this)">
-Results
+📊
+<span>Results</span>
 </button>
 
 <button onclick="showSection('history',this)">
-Student History
+📚
+<span>History</span>
 </button>
 
 <button onclick="showSection('backup',this)">
-Backup
+☁️
+<span>Backup</span>
 </button>
 
-  <button onclick="adminLogout()">
-🚪 Logout
-  </button>
+<button onclick="adminLogout()">
+🚪
+<span>Logout</span>
+</button>
 
 </nav>
 
@@ -128,65 +156,360 @@ Backup
 
 <section id="dashboard" class="section active">
 
-<h2>Dashboard</h2>
+<div class="dashboard-heading">
 
-<div class="cards">
+    <div>
+        <span class="dashboard-eyebrow">
+            🎓 RAMPUR FREE TUITION
+        </span>
 
-<div class="card">
-<h3>Total Students</h3>
-<p id="totalStudents">0</p>
-</div>
+        <h2>Dashboard</h2>
 
-<div class="card">
-<h3>Group A</h3>
-<p id="groupA">0</p>
-</div>
+        <p>
+            Welcome back 👋 Here's your tuition overview.
+        </p>
+    </div>
 
-<div class="card">
-<h3>Group B</h3>
-<p id="groupB">0</p>
-</div>
-
-<div class="card">
-<h3>Group C</h3>
-<p id="groupC">0</p>
-</div>
-
-<div class="card">
-<h3>Present Today</h3>
-<p id="presentToday">0</p>
-</div>
-
-<div class="card">
-<h3>Absent Today</h3>
-<p id="absentToday">0</p>
-</div>
+    <div class="dashboard-date">
+        📅 <span id="dashboardDate">Today</span>
+    </div>
 
 </div>
 
 
-<div class="panel">
+<!-- =========================
+     STAT CARDS
+========================= -->
 
-<h3>Recently Added Students</h3>
+<div class="dashboard-stats">
 
-<p class="small">
-Showing the latest 10 students.
-</p>
+    <div class="stat-card students-stat">
 
-<table>
+        <div class="stat-top">
+            <div class="stat-icon">
+                👨‍🎓
+            </div>
 
-<thead>
-<tr>
-<th>Student</th>
-<th>Class</th>
-<th>Group</th>
-<th>Roll</th>
-</tr>
-</thead>
+            <span class="stat-label">
+                TOTAL STUDENTS
+            </span>
+        </div>
 
-<tbody id="dashboardStudents"></tbody>
+        <div class="stat-number"
+             id="totalStudents">
+            0
+        </div>
 
-</table>
+        <div class="stat-bottom">
+            <span>All enrolled students</span>
+            <span class="stat-arrow">↗</span>
+        </div>
+
+    </div>
+
+
+    <div class="stat-card present-stat">
+
+        <div class="stat-top">
+            <div class="stat-icon">
+                ✓
+            </div>
+
+            <span class="stat-label">
+                PRESENT TODAY
+            </span>
+        </div>
+
+        <div class="stat-number"
+             id="presentToday">
+            0
+        </div>
+
+        <div class="stat-bottom">
+            <span>Today's attendance</span>
+            <span class="stat-arrow">↗</span>
+        </div>
+
+    </div>
+
+
+    <div class="stat-card absent-stat">
+
+        <div class="stat-top">
+            <div class="stat-icon">
+                !
+            </div>
+
+            <span class="stat-label">
+                ABSENT TODAY
+            </span>
+        </div>
+
+        <div class="stat-number"
+             id="absentToday">
+            0
+        </div>
+
+        <div class="stat-bottom">
+            <span>Need attention</span>
+            <span class="stat-arrow">↗</span>
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- =========================
+     GROUP OVERVIEW
+========================= -->
+
+<div class="dashboard-section-title">
+
+    <div>
+        <span>👥</span>
+
+        <div>
+            <h3>Groups</h3>
+
+            <p>
+                Student distribution
+            </p>
+        </div>
+    </div>
+
+</div>
+
+
+<div class="group-stat-grid">
+
+    <div class="group-stat-card group-a-card">
+
+        <div class="group-stat-icon">
+            A
+        </div>
+
+        <div class="group-stat-info">
+
+            <span>GROUP A</span>
+
+            <strong id="groupA">
+                0
+            </strong>
+
+            <small>
+                Students
+            </small>
+
+        </div>
+
+        <div class="group-stat-decoration">
+            A
+        </div>
+
+    </div>
+
+
+    <div class="group-stat-card group-b-card">
+
+        <div class="group-stat-icon">
+            B
+        </div>
+
+        <div class="group-stat-info">
+
+            <span>GROUP B</span>
+
+            <strong id="groupB">
+                0
+            </strong>
+
+            <small>
+                Students
+            </small>
+
+        </div>
+
+        <div class="group-stat-decoration">
+            B
+        </div>
+
+    </div>
+
+
+    <div class="group-stat-card group-c-card">
+
+        <div class="group-stat-icon">
+            C
+        </div>
+
+        <div class="group-stat-info">
+
+            <span>GROUP C</span>
+
+            <strong id="groupC">
+                0
+            </strong>
+
+            <small>
+                Students
+            </small>
+
+        </div>
+
+        <div class="group-stat-decoration">
+            C
+        </div>
+
+    </div>
+
+</div>
+  <!-- =========================
+     TUITION OVERVIEW
+========================= -->
+
+<div class="dashboard-section-title">
+
+    <div>
+        <span>📊</span>
+
+        <div>
+            <h3>Tuition Overview</h3>
+
+            <p>
+                Quick summary of your tuition center
+            </p>
+        </div>
+    </div>
+
+</div>
+
+
+<div class="tuition-overview-grid">
+
+    <div class="tuition-overview-card">
+
+        <div class="overview-icon">
+            💰
+        </div>
+
+        <div>
+            <span>Total Fees Collected</span>
+
+            <strong id="dashboardTotalFees">
+                Rs. 0
+            </strong>
+        </div>
+
+    </div>
+
+
+    <div class="tuition-overview-card">
+
+        <div class="overview-icon">
+            📝
+        </div>
+
+        <div>
+            <span>Total Exams</span>
+
+            <strong id="dashboardTotalExams">
+                0
+            </strong>
+        </div>
+
+    </div>
+
+
+    <div class="tuition-overview-card">
+
+        <div class="overview-icon">
+            📅
+        </div>
+
+        <div>
+            <span>Overall Attendance</span>
+
+            <strong id="dashboardAttendance">
+                0%
+            </strong>
+        </div>
+
+    </div>
+
+
+    <div class="tuition-overview-card">
+
+        <div class="overview-icon">
+            📚
+        </div>
+
+        <div>
+            <span>Students With Records</span>
+
+            <strong id="dashboardStudentsWithRecords">
+                0
+            </strong>
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- =========================
+     RECENT STUDENTS
+========================= -->
+
+<div class="dashboard-recent panel">
+
+    <div class="recent-header">
+
+        <div>
+
+            <div class="recent-title">
+                <span class="recent-title-icon">
+                    👨‍🎓
+                </span>
+
+                <div>
+                    <h3>Recently Added Students</h3>
+
+                    <p>
+                        Latest students added to the center
+                    </p>
+                </div>
+            </div>
+
+        </div>
+
+        <span class="recent-badge">
+            Latest 10
+        </span>
+
+    </div>
+
+
+    <div class="recent-table-wrapper">
+
+        <table>
+
+            <thead>
+
+                <tr>
+                    <th>Student</th>
+                    <th>Class</th>
+                    <th>Group</th>
+                    <th>Roll</th>
+                </tr>
+
+            </thead>
+
+            <tbody id="dashboardStudents"></tbody>
+
+        </table>
+
+    </div>
 
 </div>
 
@@ -197,39 +520,67 @@ Showing the latest 10 students.
 <!-- =========================
      STUDENTS
 ========================= -->
+<section id="students" class="section"><!-- PAGE HEADER -->
 
-<section id="students" class="section">
+<div class="students-heading">
 
-<h2>Students</h2>
+    <div>
+        <span class="students-eyebrow">
+            🎓 RAMPUR FREE TUITION
+        </span>
 
+        <h2>Students</h2>
 
-<!-- GROUP MANAGEMENT -->
-
-<div class="panel">
-
-<h3>👥 Manage Groups</h3>
-
-<p class="small">
-Create, rename or delete student groups.
-</p>
-
-<div class="group-management">
-
-<input
-id="newGroupName"
-placeholder="New group name"
-style="max-width:250px;margin:0;">
-
-<button
-class="btn green"
-onclick="addGroup()">
-+ Add Group
-</button>
+        <p>
+            Manage students, groups, photos and personal information.
+        </p>
+    </div>
 
 </div>
 
 
-<div id="manageGroupsList"></div>
+<!-- GROUP MANAGEMENT -->
+
+<div class="students-panel panel">
+
+    <div class="students-panel-header">
+
+        <div class="students-panel-title">
+
+            <div class="students-panel-icon">
+                👥
+            </div>
+
+            <div>
+                <h3>Manage Groups</h3>
+
+                <p>
+                    Create, rename or delete student groups.
+                </p>
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <div class="group-management students-group-management">
+
+        <input
+            id="newGroupName"
+            placeholder="New group name"
+            style="max-width:250px;margin:0;">
+
+        <button
+            class="btn green"
+            onclick="addGroup()">
+            + Add Group
+        </button>
+
+    </div>
+
+
+    <div id="manageGroupsList"></div>
 
 </div>
 
@@ -237,64 +588,124 @@ onclick="addGroup()">
 
 <!-- ADD STUDENT -->
 
-<div class="panel">
+<div class="students-panel panel">
 
-<h3>Add New Student</h3>
+    <div class="students-panel-header">
 
-<div class="form-grid">
+        <div class="students-panel-title">
 
-<input id="studentName"
-placeholder="Student name">
+            <div class="students-panel-icon add-icon">
+                👨‍🎓
+            </div>
 
-<input id="studentClass"
-placeholder="Class">
+            <div>
+                <h3>Add New Student</h3>
 
-<input id="studentRoll"
-placeholder="Roll number">
+                <p>
+                    Enter the student's information below.
+                </p>
+            </div>
 
-<input id="parentName"
-placeholder="Parent / Guardian">
+        </div>
 
-<input id="parentPhone"
-placeholder="Parent phone">
-
-<select id="studentGroup"></select>
-
-</div>
+    </div>
 
 
-<div class="photo-upload-box">
+    <div class="form-grid students-form-grid">
 
-<label>
-<b>📷 Student Photo</b>
-</label>
+        <div class="student-field">
+            <label>Student Name</label>
 
-<br><br>
+            <input
+                id="studentName"
+                placeholder="Enter student name">
+        </div>
 
-<input
-type="file"
-id="studentPhoto"
-accept="image/*"
-onchange="previewStudentPhoto(event)">
 
-<img
-id="photoPreview"
-class="photo-preview"
-alt="Photo Preview">
+        <div class="student-field">
+            <label>Class</label>
 
-<p class="small">
-Choose a clear photo of the student.
-The image will be automatically compressed.
-</p>
+            <input
+                id="studentClass"
+                placeholder="Enter class">
+        </div>
 
-</div>
 
-<br>
+        <div class="student-field">
+            <label>Roll Number</label>
 
-<button class="btn"
-onclick="addStudent()">
-+ Add Student
-</button>
+            <input
+                id="studentRoll"
+                placeholder="Enter roll number">
+        </div>
+
+
+        <div class="student-field">
+            <label>Parent / Guardian</label>
+
+            <input
+                id="parentName"
+                placeholder="Enter parent / guardian">
+        </div>
+
+
+        <div class="student-field">
+            <label>Parent Phone</label>
+
+            <input
+                id="parentPhone"
+                placeholder="Enter phone number">
+        </div>
+
+
+        <div class="student-field">
+            <label>Group</label>
+
+            <select id="studentGroup"></select>
+        </div>
+
+    </div>
+
+
+    <div class="photo-upload-box students-photo-box">
+
+        <div class="photo-upload-title">
+            <span>📷</span>
+
+            <div>
+                <strong>Student Photo</strong>
+
+                <p>
+                    Add a clear photo. It will be automatically compressed.
+                </p>
+            </div>
+        </div>
+
+
+        <input
+            type="file"
+            id="studentPhoto"
+            accept="image/*"
+            onchange="previewStudentPhoto(event)">
+
+
+        <img
+            id="photoPreview"
+            class="photo-preview"
+            alt="Photo Preview">
+
+    </div>
+
+
+    <div class="student-form-actions">
+
+        <button
+            class="btn"
+            onclick="addStudent()">
+            + Add Student
+        </button>
+
+    </div>
 
 </div>
 
@@ -303,68 +714,137 @@ onclick="addStudent()">
 <!-- EDIT STUDENT -->
 
 <div
-class="panel edit-box"
-id="editStudentBox"
-style="display:none;">
+    class="students-panel panel edit-box"
+    id="editStudentBox"
+    style="display:none;">
 
-<h3>✏️ Edit Student</h3>
+    <div class="students-panel-header">
 
-<input type="hidden" id="editStudentId">
+        <div class="students-panel-title">
 
-<div class="form-grid">
+            <div class="students-panel-icon edit-icon">
+                ✏️
+            </div>
 
-<input id="editStudentName"
-placeholder="Student name">
+            <div>
+                <h3>Edit Student</h3>
 
-<input id="editStudentClass"
-placeholder="Class">
+                <p>
+                    Update the student's information.
+                </p>
+            </div>
 
-<input id="editStudentRoll"
-placeholder="Roll number">
+        </div>
 
-<input id="editParentName"
-placeholder="Parent / Guardian">
-
-<input id="editParentPhone"
-placeholder="Parent phone">
-
-<select id="editStudentGroup"></select>
-
-</div>
+    </div>
 
 
-<div class="photo-upload-box">
+    <input
+        type="hidden"
+        id="editStudentId">
 
-<b>📷 Change Student Photo</b>
 
-<br><br>
+    <div class="form-grid students-form-grid">
 
-<input
-type="file"
-id="editStudentPhoto"
-accept="image/*"
-onchange="previewEditStudentPhoto(event)">
+        <div class="student-field">
+            <label>Student Name</label>
 
-<img
-id="editPhotoPreview"
-class="photo-preview"
-alt="Photo Preview">
+            <input
+                id="editStudentName"
+                placeholder="Student name">
+        </div>
 
-</div>
 
-<br>
+        <div class="student-field">
+            <label>Class</label>
 
-<button
-class="btn green"
-onclick="saveStudentEdit()">
-💾 Save Changes
-</button>
+            <input
+                id="editStudentClass"
+                placeholder="Class">
+        </div>
 
-<button
-class="btn gray"
-onclick="cancelStudentEdit()">
-Cancel
-</button>
+
+        <div class="student-field">
+            <label>Roll Number</label>
+
+            <input
+                id="editStudentRoll"
+                placeholder="Roll number">
+        </div>
+
+
+        <div class="student-field">
+            <label>Parent / Guardian</label>
+
+            <input
+                id="editParentName"
+                placeholder="Parent / Guardian">
+        </div>
+
+
+        <div class="student-field">
+            <label>Parent Phone</label>
+
+            <input
+                id="editParentPhone"
+                placeholder="Parent phone">
+        </div>
+
+
+        <div class="student-field">
+            <label>Group</label>
+
+            <select id="editStudentGroup"></select>
+        </div>
+
+    </div>
+
+
+    <div class="photo-upload-box students-photo-box">
+
+        <div class="photo-upload-title">
+            <span>📷</span>
+
+            <div>
+                <strong>Change Student Photo</strong>
+
+                <p>
+                    Select a new photo if you want to replace the current one.
+                </p>
+            </div>
+        </div>
+
+
+        <input
+            type="file"
+            id="editStudentPhoto"
+            accept="image/*"
+            onchange="previewEditStudentPhoto(event)">
+
+
+        <img
+            id="editPhotoPreview"
+            class="photo-preview"
+            alt="Photo Preview">
+
+    </div>
+
+
+    <div class="student-form-actions">
+
+        <button
+            class="btn green"
+            onclick="saveStudentEdit()">
+            💾 Save Changes
+        </button>
+
+        <button
+            class="btn gray"
+            onclick="cancelStudentEdit()">
+            Cancel
+        </button>
+
+    </div>
 
 </div>
 
@@ -372,38 +852,69 @@ Cancel
 
 <!-- STUDENT LIST -->
 
-<div class="panel">
+<div class="students-panel panel">
 
-<h3>Student List</h3>
+    <div class="students-panel-header">
 
-<div
-class="group-buttons"
-id="studentGroupButtons">
-</div>
+        <div class="students-panel-title">
+
+            <div class="students-panel-icon list-icon">
+                📋
+            </div>
+
+            <div>
+                <h3>Student List</h3>
+
+                <p>
+                    Browse and manage all enrolled students.
+                </p>
+            </div>
+
+        </div>
+
+    </div>
 
 
-<input
-id="studentSearch"
-placeholder="Search student..."
-oninput="renderStudents()">
+    <div
+        class="group-buttons students-group-buttons"
+        id="studentGroupButtons">
+    </div>
 
 
-<table>
+    <div class="student-search-box">
 
-<thead>
-<tr>
-<th>Student</th>
-<th>Class</th>
-<th>Roll</th>
-<th>Parent</th>
-<th>Phone</th>
-<th>Action</th>
-</tr>
-</thead>
+        <span>🔍</span>
 
-<tbody id="studentTable"></tbody>
+        <input
+            id="studentSearch"
+            placeholder="Search by student name..."
+            oninput="renderStudents()">
 
-</table>
+    </div>
+
+
+    <div class="student-table-wrapper">
+
+        <table>
+
+            <thead>
+
+                <tr>
+                    <th>Student</th>
+                    <th>Class</th>
+                    <th>Roll</th>
+                    <th>Parent</th>
+                    <th>Phone</th>
+                    <th>Action</th>
+                </tr>
+
+            </thead>
+
+            <tbody id="studentTable"></tbody>
+
+        </table>
+
+    </div>
 
 </div>
 
@@ -414,8 +925,7 @@ oninput="renderStudents()">
 <!-- =========================
      ATTENDANCE
 ========================= -->
-
-<section id="attendance" class="section">
+  <section id="attendance" class="section">
 
 <h2>Daily Attendance</h2>
 
@@ -434,17 +944,16 @@ onchange="renderAttendance()">
 
 </div>
 
-
 <div
 class="group-buttons"
 id="attendanceGroupButtons">
 </div>
 
-
 <p class="small">
 Select a date, then mark every student Present or Absent.
 </p>
 
+<div class="table-scroll">
 
 <table>
 
@@ -463,6 +972,8 @@ Select a date, then mark every student Present or Absent.
 
 </div>
 
+</div>
+
 
 <div class="panel">
 
@@ -476,6 +987,8 @@ id="attendanceMonth"
 onchange="renderMonthlyAttendance()">
 
 </div>
+
+<div class="table-scroll">
 
 <table>
 
@@ -497,9 +1010,9 @@ onchange="renderMonthlyAttendance()">
 
 </div>
 
-</section>
+</div>
 
-
+  </section>
 
 <!-- =========================
      FEES
@@ -513,9 +1026,38 @@ onchange="renderMonthlyAttendance()">
 
 <h3>Record Monthly Fee</h3>
 
-<div class="form-grid">
+<!-- Search student -->
+<div class="fee-student-search">
 
-<select id="feeStudent"></select>
+<input
+type="text"
+id="feeStudentSearch"
+placeholder="🔎 Search student by name, roll, class or group..."
+oninput="searchFeeStudents()"
+autocomplete="off">
+
+<div
+id="feeStudentSearchResults"
+class="fee-student-search-results">
+</div>
+
+</div>
+
+<!-- Selected student -->
+<div
+id="feeSelectedStudent"
+class="fee-selected-student"
+style="display:none">
+</div>
+
+<!-- Keep the original select for existing JS -->
+<select
+id="feeStudent"
+style="display:none">
+</select>
+
+
+<div class="form-grid">
 
 <input
 type="month"
@@ -567,7 +1109,6 @@ Save Fee
 <!-- =========================
      RESULTS
 ========================= -->
-
 <section id="results" class="section">
 
 <h2>Exam Results</h2>
@@ -607,11 +1148,32 @@ id="examSelect"
 onchange="renderResults()">
 </select>
 
+<div class="exam-menu">
+
 <button
-class="btn red"
-onclick="deleteExam()">
-🗑 Delete Exam
+class="exam-menu-button"
+onclick="toggleExamMenu(this)">
+⋮
 </button>
+
+<div class="exam-menu-dropdown">
+
+<button
+onclick="editSelectedExam()">
+✏️
+<span>Edit Exam</span>
+</button>
+
+<button
+class="delete-option"
+onclick="deleteSelectedExam()">
+🗑️
+<span>Delete Exam</span>
+</button>
+
+</div>
+
+</div>
 
 </div>
 
@@ -627,27 +1189,58 @@ id="resultGroupButtons">
 </div>
 
 
+<!-- Search student -->
+
+<div class="results-search-box">
+
+<input
+type="text"
+id="resultStudentSearch"
+placeholder="🔎 Search student by name or roll..."
+oninput="searchResultStudents()"
+autocomplete="off">
+
+</div>
+
+
+<!-- Results view -->
+
+<div class="results-view-switch">
+
+<button
+id="resultSummaryBtn"
+class="results-view-btn active"
+onclick="setResultsView('summary')">
+
+📊 Summary
+
+</button>
+
+
+<button
+id="resultEntryBtn"
+class="results-view-btn"
+onclick="setResultsView('entry')">
+
+📝 Enter Marks
+
+</button>
+
+</div>
+
+
+<div class="table-scroll">
+
 <table>
 
-<thead>
-
-<tr>
-<th>Student</th>
-<th>English /25</th>
-<th>Nepali /25</th>
-<th>Math /25</th>
-<th>Science /25</th>
-<th>Total /100</th>
-<th>%</th>
-<th>Grade</th>
-<th>Result</th>
-</tr>
-
+<thead id="resultsTableHead">
 </thead>
 
 <tbody id="resultsTable"></tbody>
 
 </table>
+
+</div>
 
 </div>
 
@@ -724,10 +1317,8 @@ style="display:none">
 
 <p class="small">
 
-Your current version stores information inside your browser.
-If browser data is deleted, your records can be lost.
-
-Therefore regularly download a backup.
+Your student records are stored securely in the cloud.
+For extra safety, regularly download a backup file to keep an offline copy of your data.
 
 </p>
 
@@ -793,6 +1384,7 @@ Groups:
 </div>
 
 <script src="script.js"></script>
+
   <script>
 if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
