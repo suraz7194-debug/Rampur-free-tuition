@@ -98,18 +98,8 @@ async function loadStudentsFromSupabase() {
         .order("id", { ascending: true });
 
     if (error) {
-
-    console.error(
-        "SUPABASE LOAD ERROR:",
-        error
-    );
-
-    console.log(
-        "Loading students from offline database..."
-    );
-
-    await loadStudentsFromOfflineDB();
-
+    console.error("SUPABASE LOAD ERROR:", error);
+    alert("Supabase Load Error:\n" + error.message);
     return;
     }
   
@@ -127,111 +117,6 @@ async function loadStudentsFromSupabase() {
     }));
 
     renderAll();
-
-await saveStudentsToOfflineDB();
-
-}
-async function saveStudentsToOfflineDB(){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "students",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "students"
-            );
-
-        students.forEach(student => {
-
-            store.put(student);
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Students saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save students offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
-
-}
-async function loadStudentsFromOfflineDB(){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "students",
-                "readonly"
-            );
-
-        const store =
-            transaction.objectStore(
-                "students"
-            );
-
-        const request =
-            store.getAll();
-
-        request.onsuccess = function(){
-
-            students =
-                request.result || [];
-
-            console.log(
-                "Students loaded from offline database."
-            );
-
-            renderAll();
-
-            resolve();
-
-        };
-
-        request.onerror = function(){
-
-            console.error(
-                "Could not load students offline:",
-                request.error
-            );
-
-            reject(
-                request.error
-            );
-
-        };
-
-    });
-
 }
 
 let attendance = {};
@@ -283,76 +168,6 @@ async function loadAttendanceFromSupabase(){
 renderMonthlyAttendance();
 renderDashboard();
 
-await saveAttendanceToOfflineDB();
-
-}
-async function saveAttendanceToOfflineDB(){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "attendance",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "attendance"
-            );
-
-        Object.keys(attendance).forEach(date => {
-
-            Object.keys(attendance[date]).forEach(studentId => {
-
-                store.put({
-
-                    id:
-                        date + "_" + studentId,
-
-                    date:
-                        date,
-
-                    student_id:
-                        Number(studentId),
-
-                    status:
-                        attendance[date][studentId]
-
-                });
-
-            });
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Attendance saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save attendance offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
-
 }
 
 let fees = [];
@@ -398,75 +213,6 @@ async function loadFeesFromSupabase(){
 
 
     renderFees();
-  
-await saveFeesToOfflineDB();
-
-}
-async function saveFeesToOfflineDB(){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "fees",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "fees"
-            );
-
-        fees.forEach(fee => {
-
-            store.put({
-
-                id:
-                    fee.id,
-
-                student_id:
-                    fee.studentId,
-
-                month:
-                    fee.month,
-
-                amount:
-                    Number(fee.amount),
-
-                date:
-                    fee.paidDate
-
-            });
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Fees saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save fees offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
 
 }
 
@@ -509,69 +255,6 @@ async function loadExamsFromSupabase(){
 
 
     renderExamSelect();
-
-await saveExamsToOfflineDB();
-
-}
-async function saveExamsToOfflineDB(){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "exams",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "exams"
-            );
-
-        exams.forEach(exam => {
-
-            store.put({
-
-                id:
-                    exam.id,
-
-                exam_name:
-                    exam.name,
-
-                date:
-                    exam.date
-
-            });
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Exams saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save exams offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
 
 }
 
@@ -631,92 +314,6 @@ async function loadResultsFromSupabase(){
 
 
     renderResults();
-  await saveResultsToOfflineDB();
-
-}
-async function saveResultsToOfflineDB(){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "results",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "results"
-            );
-
-        Object.keys(results).forEach(examId => {
-
-            Object.keys(results[examId]).forEach(studentId => {
-
-                const result =
-                    results[examId][studentId];
-
-                store.put({
-
-                    id:
-                        String(examId) +
-                        "_" +
-                        String(studentId),
-
-                    exam_id:
-                        Number(examId),
-
-                    student_id:
-                        Number(studentId),
-
-                    english:
-                        Number(result.english || 0),
-
-                    nepali:
-                        Number(result.nepali || 0),
-
-                    maths:
-                        Number(result.math || 0),
-
-                    science:
-                        Number(result.science || 0),
-
-                    total:
-                        Number(result.total || 0)
-
-                });
-
-            });
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Results saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save results offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
 
 }
 
@@ -806,92 +403,6 @@ groups =
 
 
     renderAll();
-
-await saveGroupsToOfflineDB();
-
-}
-function openOfflineDatabase(){
-
-    return new Promise((resolve, reject) => {
-
-        const request = indexedDB.open(
-            OFFLINE_DB_NAME,
-            OFFLINE_DB_VERSION
-        );
-
-        request.onupgradeneeded = function(event){
-
-            const db = event.target.result;
-
-            if(!db.objectStoreNames.contains("students")){
-                db.createObjectStore("students", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("groups")){
-                db.createObjectStore("groups", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("attendance")){
-                db.createObjectStore("attendance", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("fees")){
-                db.createObjectStore("fees", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("exams")){
-                db.createObjectStore("exams", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("results")){
-                db.createObjectStore("results", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("syncQueue")){
-                db.createObjectStore("syncQueue", {
-                    keyPath: "queueId",
-                    autoIncrement: true
-                });
-            }
-
-        };
-
-        request.onsuccess = function(event){
-
-            offlineDB = event.target.result;
-
-            console.log(
-                "Offline database ready."
-            );
-
-            resolve(offlineDB);
-
-        };
-
-        request.onerror = function(){
-
-            console.error(
-                "Offline database error:",
-                request.error
-            );
-
-            reject(request.error);
-
-        };
-
-    });
 
 }
 
@@ -6683,31 +6194,21 @@ document.getElementById(
 saveAll();
 renderAll();
 async function startApp(){
-  console.log("START APP: beginning");
-
-    try{
-
-        await openOfflineDatabase();
-      console.log("START APP: offline database finished");
-
-    }
-    catch(error){
-
-        console.error(
-            "Could not initialize offline database:",
-            error
-        );
-
-    }
 
     await loadGroupsFromSupabase();
+
     await loadStudentsFromSupabase();
+
     await loadAttendanceFromSupabase();
+
     await loadFeesFromSupabase();
+
     await loadExamsFromSupabase();
+
     await loadResultsFromSupabase();
 
 }
+
 startApp();
 
 function toggleExamMenu(button){
@@ -7202,111 +6703,4 @@ async function editFee(id){
         "✅ Fee updated successfully."
     );
 
-}
-window.addEventListener("load", function(){
-
-    setTimeout(function(){
-
-        const splash =
-            document.getElementById("appSplash");
-
-        if(splash){
-            splash.remove();
-        }
-
-    }, 2100);
-
-});
-/* =====================================================
-   OFFLINE DATABASE — INDEXEDDB
-===================================================== */
-
-const OFFLINE_DB_NAME = "RampurFreeTuitionOfflinev2";
-const OFFLINE_DB_VERSION = 2;
-
-let offlineDB = null;
-
-function openOfflineDatabase(){
-
-    return new Promise((resolve, reject) => {
-
-        const request = indexedDB.open(
-            OFFLINE_DB_NAME,
-            OFFLINE_DB_VERSION
-        );
-
-        request.onupgradeneeded = function(event){
-
-            const db = event.target.result;
-
-            if(!db.objectStoreNames.contains("students")){
-                db.createObjectStore("students", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("groups")){
-                db.createObjectStore("groups", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("attendance")){
-                db.createObjectStore("attendance", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("fees")){
-                db.createObjectStore("fees", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("exams")){
-                db.createObjectStore("exams", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("results")){
-                db.createObjectStore("results", {
-                    keyPath: "id"
-                });
-            }
-
-            if(!db.objectStoreNames.contains("syncQueue")){
-                db.createObjectStore("syncQueue", {
-                    keyPath: "queueId",
-                    autoIncrement: true
-                });
-            }
-
-        };
-
-        request.onsuccess = function(event){
-
-            offlineDB = event.target.result;
-
-            console.log(
-                "Offline database ready."
-            );
-
-            resolve(offlineDB);
-
-        };
-
-        request.onerror = function(){
-
-            console.error(
-                "Offline database error:",
-                request.error
-            );
-
-            reject(request.error);
-
-        };
-
-    });
-
-           }
+       }
