@@ -117,6 +117,59 @@ async function loadStudentsFromSupabase() {
     }));
 
     renderAll();
+
+await saveStudentsToOfflineDB();
+
+}
+async function saveStudentsToOfflineDB(){
+
+    if(!offlineDB)
+        return;
+
+    return new Promise((resolve, reject) => {
+
+        const transaction =
+            offlineDB.transaction(
+                "students",
+                "readwrite"
+            );
+
+        const store =
+            transaction.objectStore(
+                "students"
+            );
+
+        students.forEach(student => {
+
+            store.put(student);
+
+        });
+
+        transaction.oncomplete = function(){
+
+            console.log(
+                "Students saved to offline database."
+            );
+
+            resolve();
+
+        };
+
+        transaction.onerror = function(){
+
+            console.error(
+                "Could not save students offline:",
+                transaction.error
+            );
+
+            reject(
+                transaction.error
+            );
+
+        };
+
+    });
+
 }
 
 let attendance = {};
@@ -6195,16 +6248,25 @@ saveAll();
 renderAll();
 async function startApp(){
 
+    try{
+
+        await openOfflineDatabase();
+
+    }
+    catch(error){
+
+        console.error(
+            "Could not initialize offline database:",
+            error
+        );
+
+    }
+
     await loadGroupsFromSupabase();
-
     await loadStudentsFromSupabase();
-
     await loadAttendanceFromSupabase();
-
     await loadFeesFromSupabase();
-
     await loadExamsFromSupabase();
-
     await loadResultsFromSupabase();
 
 }
@@ -6718,3 +6780,152 @@ window.addEventListener("load", function(){
     }, 2100);
 
 });
+/* =====================================================
+   OFFLINE DATABASE — INDEXEDDB
+===================================================== */
+
+const OFFLINE_DB_NAME = "RampurFreeTuitionOffline";
+const OFFLINE_DB_VERSION = 1;
+
+let offlineDB = null;
+
+
+function openOfflineDatabase(){
+
+    return new Promise((resolve, reject) => {
+
+        const request =
+            indexedDB.open(
+                OFFLINE_DB_NAME,
+                OFFLINE_DB_VERSION
+            );
+
+
+        request.onupgradeneeded = function(event){
+
+            const db =
+                event.target.result;
+
+
+            if(!db.objectStoreNames.contains("students")){
+
+                db.createObjectStore(
+                    "students",
+                    {
+                        keyPath: "id"
+                    }
+                );
+
+            }
+
+
+            if(!db.objectStoreNames.contains("groups")){
+
+                db.createObjectStore(
+                    "groups",
+                    {
+                        keyPath: "id"
+                    }
+                );
+
+            }
+
+
+            if(!db.objectStoreNames.contains("attendance")){
+
+                db.createObjectStore(
+                    "attendance",
+                    {
+                        keyPath: "id",
+                        autoIncrement: true
+                    }
+                );
+
+            }
+
+
+            if(!db.objectStoreNames.contains("fees")){
+
+                db.createObjectStore(
+                    "fees",
+                    {
+                        keyPath: "id",
+                        autoIncrement: true
+                    }
+                );
+
+            }
+
+
+            if(!db.objectStoreNames.contains("exams")){
+
+                db.createObjectStore(
+                    "exams",
+                    {
+                        keyPath: "id"
+                    }
+                );
+
+            }
+
+
+            if(!db.objectStoreNames.contains("results")){
+
+                db.createObjectStore(
+                    "results",
+                    {
+                        keyPath: "id",
+                        autoIncrement: true
+                    }
+                );
+
+            }
+
+
+            if(!db.objectStoreNames.contains("syncQueue")){
+
+                db.createObjectStore(
+                    "syncQueue",
+                    {
+                        keyPath: "queueId",
+                        autoIncrement: true
+                    }
+                );
+
+            }
+
+        };
+
+
+        request.onsuccess = function(event){
+
+            offlineDB =
+                event.target.result;
+
+            console.log(
+                "Offline database ready."
+            );
+
+            resolve(
+                offlineDB
+            );
+
+        };
+
+
+        request.onerror = function(){
+
+            console.error(
+                "Offline database error:",
+                request.error
+            );
+
+            reject(
+                request.error
+            );
+
+        };
+
+    });
+
+}
