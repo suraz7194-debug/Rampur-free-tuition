@@ -5441,6 +5441,17 @@ No exam results.
    DASHBOARD
 ===================================================== */
 function renderDashboard(){
+   // 1. Update current date display
+    const dateElement = document.getElementById("dashboardDate");
+    if (dateElement) {
+        const todayObj = new Date();
+        dateElement.textContent = todayObj.toLocaleDateString("en-US", {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+            year: "numeric"
+        });
+    }
 
     document.getElementById(
         "totalStudents"
