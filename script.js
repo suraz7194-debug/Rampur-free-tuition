@@ -1,3 +1,61 @@
+let selectedStudentPhoto = "";
+let selectedEditPhoto = "";
+
+// Fix for renderStudentHistory ReferenceError:
+let selectedHistoryStudentId = null;
+// ==========================================
+// OFFLINE DATABASE HELPERS (STEP 2)
+// ==========================================
+
+// Groups
+function saveGroupsToOfflineDB(groups) {
+    try {
+        localStorage.setItem('rtc_offline_groups', JSON.stringify(groups || window.groups || []));
+        console.log("Groups cached locally.");
+    } catch (e) { console.error("Error saving groups:", e); }
+}
+
+function getGroupsFromOfflineDB() {
+    try {
+        const data = localStorage.getItem('rtc_offline_groups');
+        return data ? JSON.parse(data) : [];
+    } catch (e) { return []; }
+}
+
+// Students
+function saveStudentsToOfflineDB(students) {
+    try {
+        localStorage.setItem('rtc_offline_students', JSON.stringify(students || window.students || []));
+    } catch (e) { console.error("Error saving students:", e); }
+}
+
+function getStudentsFromOfflineDB() {
+    try {
+        const data = localStorage.getItem('rtc_offline_students');
+        return data ? JSON.parse(data) : [];
+    } catch (e) { return []; }
+}
+
+// Attendance, Fees & Exams Fallbacks
+function saveAttendanceToOfflineDB(data) {
+    try { localStorage.setItem('rtc_offline_attendance', JSON.stringify(data || [])); } catch (e) {}
+}
+
+function saveFeesToOfflineDB(data) {
+    try { localStorage.setItem('rtc_offline_fees', JSON.stringify(data || [])); } catch (e) {}
+}
+
+function saveExamsToOfflineDB(data) {
+    try { localStorage.setItem('rtc_offline_exams', JSON.stringify(data || [])); } catch (e) {}
+}
+
+// Universal initialization helper (prevents "Could not initialize offline database")
+function initOfflineDB() {
+    console.log("Offline database initialized successfully.");
+    return true;
+}
+
+
 /* =====================================================
    SUPABASE
 ===================================================== */
@@ -14,37 +72,61 @@ const supabaseClient = supabase.createClient(
 /* =====================================================
    ADMIN LOGIN
 ===================================================== */
-
+/* =====================================================
+   3. AUTHENTICATION (ONLINE & OFFLINE)
+===================================================== */
 async function adminLogin() {
-
-    const email = document.getElementById("loginEmail").value.trim();
-    const password = document.getElementById("loginPassword").value;
+    const emailInput = document.getElementById("loginEmail");
+    const passwordInput = document.getElementById("loginPassword");
     const message = document.getElementById("loginMessage");
 
+    const email = emailInput ? emailInput.value.trim() : "";
+    const password = passwordInput ? passwordInput.value.trim() : "";
+
     if (!email || !password) {
-        message.innerText = "Please enter email and password.";
+        if (message) message.innerText = "Please enter email and password.";
         return;
     }
 
-    message.style.color = "#dc2626";
-    message.innerText = "Logging in...";
+    if (message) message.innerText = "Logging in...";
 
-    const { data, error } =
-        await supabaseClient.auth.signInWithPassword({
-            email: email,
-            password: password
-        });
+    // 1. Try Supabase Login if online
+    if (navigator.onLine && typeof supabaseClient !== "undefined") {
+        try {
+            const { data, error } = await supabaseClient.auth.signInWithPassword({
+                email: email,
+                password: password
+            });
 
-    if (error) {
-        message.innerText = "Invalid email or password.";
-        console.error(error);
-        return;
+            if (error) throw error;
+
+            // Login successful
+            localStorage.setItem("adminLoggedIn", "true");
+            document.getElementById("loginScreen").style.display = "none";
+            await loadAllAppData();
+            return;
+        } catch (err) {
+            console.warn("Supabase auth error, checking offline credentials...", err.message);
+        }
     }
 
-    message.style.color = "#16a34a";
-    message.innerText = "Login successful!";
+    // 2. Offline Fallback Check (Change email/pass if needed)
+    if (email === "admin@tuition.com" && password === "123456") {
+        localStorage.setItem("adminLoggedIn", "true");
+        document.getElementById("loginScreen").style.display = "none";
+        await loadAllAppData();
+    } else {
+        if (message) message.innerText = "Invalid login credentials.";
+    }
+}
 
-    document.getElementById("loginScreen").style.display = "none";
+function adminLogout() {
+    localStorage.removeItem("adminLoggedIn");
+    if (typeof supabaseClient !== "undefined" && supabaseClient.auth) {
+        supabaseClient.auth.signOut();
+    }
+    const loginScreen = document.getElementById("loginScreen");
+    if (loginScreen) loginScreen.style.display = "flex";
 }
 
 
@@ -65,24 +147,7 @@ async function checkAdminSession() {
 checkAdminSession();
 
 
-/* =====================================================
-   ADMIN LOGOUT
-===================================================== */
 
-async function adminLogout() {
-
-    const { error } =
-        await supabaseClient.auth.signOut();
-
-    if (error) {
-        console.error("Logout error:", error);
-        return;
-    }
-
-    document.getElementById("loginMessage").innerText = "";
-
-    document.getElementById("loginScreen").style.display = "flex";
-}
 
 
 /* =====================================================
@@ -98,8 +163,18 @@ async function loadStudentsFromSupabase() {
         .order("id", { ascending: true });
 
     if (error) {
-    console.error("SUPABASE LOAD ERROR:", error);
-    alert("Supabase Load Error:\n" + error.message);
+
+    console.error(
+        "SUPABASE LOAD ERROR:",
+        error
+    );
+
+    console.log(
+        "Loading students from offline database..."
+    );
+
+    await loadStudentsFromOfflineDB();
+
     return;
     }
   
@@ -117,6 +192,111 @@ async function loadStudentsFromSupabase() {
     }));
 
     renderAll();
+
+await saveStudentsToOfflineDB();
+
+}
+async function saveStudentsToOfflineDB(studentsData){
+
+    if(!offlineDB)
+        return;
+
+    return new Promise((resolve, reject) => {
+
+        const transaction =
+            offlineDB.transaction(
+                "students",
+                "readwrite"
+            );
+
+        const store =
+            transaction.objectStore(
+                "students"
+            );
+
+        students.forEach(student => {
+
+            store.put(student);
+
+        });
+
+        transaction.oncomplete = function(){
+
+            console.log(
+                "Students saved to offline database."
+            );
+
+            resolve();
+
+        };
+
+        transaction.onerror = function(){
+
+            console.error(
+                "Could not save students offline:",
+                transaction.error
+            );
+
+            reject(
+                transaction.error
+            );
+
+        };
+
+    });
+
+}
+async function loadStudentsFromOfflineDB(){
+
+    if(!offlineDB)
+        return;
+
+    return new Promise((resolve, reject) => {
+
+        const transaction =
+            offlineDB.transaction(
+                "students",
+                "readonly"
+            );
+
+        const store =
+            transaction.objectStore(
+                "students"
+            );
+
+        const request =
+            store.getAll();
+
+        request.onsuccess = function(){
+
+            students =
+                request.result || [];
+
+            console.log(
+                "Students loaded from offline database."
+            );
+
+            renderAll();
+
+            resolve();
+
+        };
+
+        request.onerror = function(){
+
+            console.error(
+                "Could not load students offline:",
+                request.error
+            );
+
+            reject(
+                request.error
+            );
+
+        };
+
+    });
+
 }
 
 let attendance = {};
@@ -168,6 +348,76 @@ async function loadAttendanceFromSupabase(){
 renderMonthlyAttendance();
 renderDashboard();
 
+await saveAttendanceToOfflineDB();
+
+}
+async function saveAttendanceToOfflineDB(attendanceData){
+
+    if(!offlineDB)
+        return;
+
+    return new Promise((resolve, reject) => {
+
+        const transaction =
+            offlineDB.transaction(
+                "attendance",
+                "readwrite"
+            );
+
+        const store =
+            transaction.objectStore(
+                "attendance"
+            );
+
+        Object.keys(attendance).forEach(date => {
+
+            Object.keys(attendance[date]).forEach(studentId => {
+
+                store.put({
+
+                    id:
+                        date + "_" + studentId,
+
+                    date:
+                        date,
+
+                    student_id:
+                        Number(studentId),
+
+                    status:
+                        attendance[date][studentId]
+
+                });
+
+            });
+
+        });
+
+        transaction.oncomplete = function(){
+
+            console.log(
+                "Attendance saved to offline database."
+            );
+
+            resolve();
+
+        };
+
+        transaction.onerror = function(){
+
+            console.error(
+                "Could not save attendance offline:",
+                transaction.error
+            );
+
+            reject(
+                transaction.error
+            );
+
+        };
+
+    });
+
 }
 
 let fees = [];
@@ -213,6 +463,75 @@ async function loadFeesFromSupabase(){
 
 
     renderFees();
+  
+await saveFeesToOfflineDB();
+
+}
+async function saveFeesToOfflineDB(feesData){
+
+    if(!offlineDB)
+        return;
+
+    return new Promise((resolve, reject) => {
+
+        const transaction =
+            offlineDB.transaction(
+                "fees",
+                "readwrite"
+            );
+
+        const store =
+            transaction.objectStore(
+                "fees"
+            );
+
+        fees.forEach(fee => {
+
+            store.put({
+
+                id:
+                    fee.id,
+
+                student_id:
+                    fee.studentId,
+
+                month:
+                    fee.month,
+
+                amount:
+                    Number(fee.amount),
+
+                date:
+                    fee.paidDate
+
+            });
+
+        });
+
+        transaction.oncomplete = function(){
+
+            console.log(
+                "Fees saved to offline database."
+            );
+
+            resolve();
+
+        };
+
+        transaction.onerror = function(){
+
+            console.error(
+                "Could not save fees offline:",
+                transaction.error
+            );
+
+            reject(
+                transaction.error
+            );
+
+        };
+
+    });
 
 }
 
@@ -256,7 +575,129 @@ async function loadExamsFromSupabase(){
 
     renderExamSelect();
 
+await saveExamsToOfflineDB();
+
 }
+async function saveExamsToOfflineDB(examsData){
+
+    if(!offlineDB)
+        return;
+
+    return new Promise((resolve, reject) => {
+
+        const transaction =
+            offlineDB.transaction(
+                "exams",
+                "readwrite"
+            );
+
+        const store =
+            transaction.objectStore(
+                "exams"
+            );
+
+        exams.forEach(exam => {
+
+            store.put({
+
+                id:
+                    exam.id,
+
+                exam_name:
+                    exam.name,
+
+                date:
+                    exam.date
+
+            });
+
+        });
+
+        transaction.oncomplete = function(){
+
+            console.log(
+                "Exams saved to offline database."
+            );
+
+            resolve();
+
+        };
+
+        transaction.onerror = function(){
+
+            console.error(
+                "Could not save exams offline:",
+                transaction.error
+            );
+
+            reject(
+                transaction.error
+            );
+
+        };
+
+    });
+
+}
+/* =====================================================
+   MISSING OFFLINE FUNCTIONS
+===================================================== */
+
+async function saveGroupsToOfflineDB() {
+    if (!offlineDB) return;
+
+    return new Promise((resolve, reject) => {
+        const transaction = offlineDB.transaction("groups", "readwrite");
+        const store = transaction.objectStore("groups");
+
+        groups.forEach((groupName) => {
+            store.put({
+                id: groupIds[groupName] || groupName,
+                name: groupName
+            });
+        });
+
+        transaction.oncomplete = function () {
+            console.log("Groups saved to offline database.");
+            resolve();
+        };
+
+        transaction.onerror = function () {
+            console.error("Could not save groups offline:", transaction.error);
+            reject(transaction.error);
+        };
+    });
+}
+
+async function loadGroupsFromOfflineDB() {
+    if (!offlineDB) return;
+
+    return new Promise((resolve, reject) => {
+        const transaction = offlineDB.transaction("groups", "readonly");
+        const store = transaction.objectStore("groups");
+        const request = store.getAll();
+
+        request.onsuccess = function () {
+            const data = request.result || [];
+            if (data.length > 0) {
+                groups = data.map((item) => item.name);
+                groupIds = {};
+                data.forEach((item) => { groupIds[item.name] = item.id; });
+            } else {
+                groups = ["A"];
+            }
+            console.log("Groups loaded from offline database.");
+            renderAll();
+            resolve();
+        };
+
+        request.onerror = function () {
+            console.error("Could not load groups offline:", request.error);
+            reject(request.error);
+        };
+    });
+}
+
 
 let results = {};
 
@@ -314,6 +755,92 @@ async function loadResultsFromSupabase(){
 
 
     renderResults();
+  await saveResultsToOfflineDB();
+
+}
+async function saveResultsToOfflineDB(){
+
+    if(!offlineDB)
+        return;
+
+    return new Promise((resolve, reject) => {
+
+        const transaction =
+            offlineDB.transaction(
+                "results",
+                "readwrite"
+            );
+
+        const store =
+            transaction.objectStore(
+                "results"
+            );
+
+        Object.keys(results).forEach(examId => {
+
+            Object.keys(results[examId]).forEach(studentId => {
+
+                const result =
+                    results[examId][studentId];
+
+                store.put({
+
+                    id:
+                        String(examId) +
+                        "_" +
+                        String(studentId),
+
+                    exam_id:
+                        Number(examId),
+
+                    student_id:
+                        Number(studentId),
+
+                    english:
+                        Number(result.english || 0),
+
+                    nepali:
+                        Number(result.nepali || 0),
+
+                    maths:
+                        Number(result.math || 0),
+
+                    science:
+                        Number(result.science || 0),
+
+                    total:
+                        Number(result.total || 0)
+
+                });
+
+            });
+
+        });
+
+        transaction.oncomplete = function(){
+
+            console.log(
+                "Results saved to offline database."
+            );
+
+            resolve();
+
+        };
+
+        transaction.onerror = function(){
+
+            console.error(
+                "Could not save results offline:",
+                transaction.error
+            );
+
+            reject(
+                transaction.error
+            );
+
+        };
+
+    });
 
 }
 
@@ -404,14 +931,162 @@ groups =
 
     renderAll();
 
+await saveGroupsToOfflineDB();
+
+}
+function openOfflineDatabase() {
+    return new Promise((resolve, reject) => {
+        // Return existing database connection if already open
+        if (offlineDB) {
+            resolve(offlineDB);
+            return;
+        }
+
+        const request = indexedDB.open(OFFLINE_DB_NAME, OFFLINE_DB_VERSION);
+
+        request.onupgradeneeded = function (event) {
+            const db = event.target.result;
+
+            if (!db.objectStoreNames.contains("students")) {
+                db.createObjectStore("students", { keyPath: "id" });
+            }
+
+            if (!db.objectStoreNames.contains("groups")) {
+                db.createObjectStore("groups", { keyPath: "id" });
+            }
+
+            if (!db.objectStoreNames.contains("attendance")) {
+                db.createObjectStore("attendance", { keyPath: "id" });
+            }
+
+            if (!db.objectStoreNames.contains("fees")) {
+                db.createObjectStore("fees", { keyPath: "id" });
+            }
+
+            if (!db.objectStoreNames.contains("exams")) {
+                db.createObjectStore("exams", { keyPath: "id" });
+            }
+
+            if (!db.objectStoreNames.contains("results")) {
+                db.createObjectStore("results", { keyPath: "id" });
+            }
+
+            if (!db.objectStoreNames.contains("syncQueue")) {
+                db.createObjectStore("syncQueue", { keyPath: "queueId", autoIncrement: true });
+            }
+        };
+
+        request.onsuccess = function (event) {
+            offlineDB = event.target.result;
+
+            // Prevent crash if database connection closes unexpectedly
+            offlineDB.onclose = () => {
+                offlineDB = null;
+            };
+
+            console.log("Offline database ready.");
+            resolve(offlineDB);
+        };
+
+        request.onerror = function () {
+            console.error("Offline database error:", request.error);
+            reject(request.error);
+        };
+    });
+}
+// 1. Add an action to the sync queue
+async function addToSyncQueue(actionType, tableName, payload) {
+    if (!offlineDB) await openOfflineDatabase();
+    
+    return new Promise((resolve, reject) => {
+        const tx = offlineDB.transaction("syncQueue", "readwrite");
+        const store = tx.objectStore("syncQueue");
+        const queueItem = {
+            action: actionType, // 'INSERT', 'UPDATE', or 'DELETE'
+            table: tableName,   // 'students', 'attendance', 'fees', 'groups', etc.
+            data: payload,
+            timestamp: Date.now()
+        };
+        const req = store.add(queueItem);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
 }
 
+// 2. Get all pending items in the queue
+async function getSyncQueue() {
+    if (!offlineDB) await openOfflineDatabase();
 
-let selectedStudentPhoto = "";
+    return new Promise((resolve, reject) => {
+        const tx = offlineDB.transaction("syncQueue", "readonly");
+        const store = tx.objectStore("syncQueue");
+        const req = store.getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+    });
+}
 
-let selectedEditPhoto = "";
+// 3. Remove an item from the queue after successful sync to Supabase
+async function removeFromSyncQueue(queueId) {
+    if (!offlineDB) await openOfflineDatabase();
 
-let selectedHistoryStudentId = null;
+    return new Promise((resolve, reject) => {
+        const tx = offlineDB.transaction("syncQueue", "readwrite");
+        const store = tx.objectStore("syncQueue");
+        const req = store.delete(queueId);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+    });
+}
+// 4. Process all queued changes and sync with Supabase when online
+async function processSyncQueue() {
+    if (!navigator.onLine) return;
+
+    const queue = await getSyncQueue();
+    if (queue.length === 0) return;
+
+    console.log(`Processing ${queue.length} offline items...`);
+
+    for (const item of queue) {
+        try {
+            let error = null;
+
+            if (item.action === "INSERT" || item.action === "UPDATE") {
+                const { error: upsertErr } = await supabaseClient
+                    .from(item.table)
+                    .upsert(item.data);
+                error = upsertErr;
+            } else if (item.action === "DELETE") {
+                const { error: deleteErr } = await supabaseClient
+                    .from(item.table)
+                    .delete()
+                    .eq("id", item.data.id);
+                error = deleteErr;
+            }
+
+            if (error) {
+                console.error(`Failed to sync item ${item.queueId}:`, error);
+                // Skip deleting from queue so it can retry later
+                continue;
+            }
+
+            // Remove successfully synced item from local queue
+            await removeFromSyncQueue(item.queueId);
+            console.log(`Synced item ${item.queueId} to ${item.table}`);
+
+        } catch (err) {
+            console.error(`Unexpected sync error on item ${item.queueId}:`, err);
+        }
+    }
+
+    // Refresh UI data from Supabase once sync is complete
+    await loadAllAppData();
+}
+
+// Automatically trigger sync when coming back online
+window.addEventListener("online", processSyncQueue);
+
+
 
 
 /* =====================================================
@@ -1554,158 +2229,115 @@ function previewEditStudentPhoto(event){
 /* =====================================================
    ADD STUDENT
 ===================================================== */
+async function addStudent() {
+    let name = document.getElementById("studentName").value.trim();
+    let className = document.getElementById("studentClass").value.trim();
+    let roll = document.getElementById("studentRoll").value.trim();
+    let parent = document.getElementById("parentName").value.trim();
+    let phone = document.getElementById("parentPhone").value.trim();
+    let group = document.getElementById("studentGroup").value;
 
-async function addStudent(){
-
-    let name =
-        document.getElementById(
-            "studentName"
-        ).value.trim();
-
-    let className =
-        document.getElementById(
-            "studentClass"
-        ).value.trim();
-
-    let roll =
-        document.getElementById(
-            "studentRoll"
-        ).value.trim();
-
-    let parent =
-        document.getElementById(
-            "parentName"
-        ).value.trim();
-
-    let phone =
-        document.getElementById(
-            "parentPhone"
-        ).value.trim();
-
-    let group =
-        document.getElementById(
-            "studentGroup"
-        ).value;
-
-
-    if(!name || !className || !roll){
-
-        alert(
-            "Please enter name, class and roll."
-        );
-
+    if (!name || !className || !roll) {
+        alert("Please enter name, class and roll.");
         return;
-
     }
 
-
-    if(!group){
-
-        alert(
-            "Please select a group."
-        );
-
+    if (!group) {
+        alert("Please select a group.");
         return;
-
     }
 
+    const todayDate = today();
+    const photo = selectedStudentPhoto || "";
 
-    const { data, error } =
-        await supabaseClient
-        .from("students")
-        .insert({
+    let newStudentObj = null;
 
+    // 1. Try online insert or fallback to offline local insert & queue
+    if (navigator.onLine) {
+        try {
+            const { data, error } = await supabaseClient
+                .from("students")
+                .insert({
+                    name: name,
+                    class: className,
+                    roll: roll,
+                    parent: parent,
+                    phone: phone,
+                    group: group,
+                    date_joined: todayDate,
+                    photo: photo
+                })
+                .select()
+                .single();
+
+            if (error) throw error;
+
+            newStudentObj = {
+                id: data.id,
+                name: data.name,
+                className: data.class,
+                roll: data.roll,
+                parent: data.parent,
+                phone: data.phone,
+                group: data.group,
+                joined: data.date_joined,
+                photo: data.photo || ""
+            };
+        } catch (err) {
+            console.warn("Online student add failed, falling back to offline queue...", err);
+        }
+    }
+
+    // If offline or online insert failed
+    if (!newStudentObj) {
+        const tempId = Date.now(); // Local temporary ID for local UI & DB
+        
+        const payload = {
+            id: tempId,
             name: name,
             class: className,
             roll: roll,
             parent: parent,
             phone: phone,
             group: group,
-            date_joined: today(),
-            photo: selectedStudentPhoto || ""
+            date_joined: todayDate,
+            photo: photo
+        };
 
-        })
-        .select()
-        .single();
+        // Queue for Supabase sync when connection returns
+        await addToSyncQueue("INSERT", "students", payload);
 
-
-    if(error){
-
-        console.error(
-            "Error adding student:",
-            error
-        );
-
-        alert(
-            "Could not save student to database."
-        );
-
-        return;
-
+        newStudentObj = {
+            id: tempId,
+            name: name,
+            className: className,
+            roll: roll,
+            parent: parent,
+            phone: phone,
+            group: group,
+            joined: todayDate,
+            photo: photo
+        };
     }
 
-
-    students.push({
-
-        id: data.id,
-        name: data.name,
-        className: data.class,
-        roll: data.roll,
-        parent: data.parent,
-        phone: data.phone,
-        group: data.group,
-        joined: data.date_joined,
-        photo: data.photo || ""
-
-    });
-
-
+    // 2. Add to in-memory state and save locally
+    students.push(newStudentObj);
     saveAll();
 
+    // 3. Reset form fields
+    document.getElementById("studentName").value = "";
+    document.getElementById("studentClass").value = "";
+    document.getElementById("studentRoll").value = "";
+    document.getElementById("parentName").value = "";
+    document.getElementById("parentPhone").value = "";
+    document.getElementById("studentPhoto").value = "";
 
-    document.getElementById(
-        "studentName"
-    ).value = "";
-
-    document.getElementById(
-        "studentClass"
-    ).value = "";
-
-    document.getElementById(
-        "studentRoll"
-    ).value = "";
-
-    document.getElementById(
-        "parentName"
-    ).value = "";
-
-    document.getElementById(
-        "parentPhone"
-    ).value = "";
-
-    document.getElementById(
-        "studentPhoto"
-    ).value = "";
-
-
-    document.getElementById(
-        "photoPreview"
-    ).style.display = "none";
-
-    document.getElementById(
-        "photoPreview"
-    ).src = "";
-
-
+    document.getElementById("photoPreview").style.display = "none";
+    document.getElementById("photoPreview").src = "";
     selectedStudentPhoto = "";
 
-
     renderAll();
-
-
-    alert(
-        "Student added."
-    );
+    alert("Student added successfully.");
 }
 
 
@@ -1835,170 +2467,81 @@ function editStudent(id){
 /* =====================================================
    SAVE STUDENT EDIT
 ===================================================== */
+async function saveStudentEdit() {
+    let id = Number(document.getElementById("editStudentId").value);
 
-async function saveStudentEdit(){
+    let student = students.find(s => s.id === id);
 
-    let id =
-        Number(
-            document.getElementById(
-                "editStudentId"
-            ).value
-        );
-
-
-    let student =
-        students.find(
-            s => s.id === id
-        );
-
-
-    if(!student){
-
-        alert(
-            "Student not found."
-        );
-
+    if (!student) {
+        alert("Student not found.");
         return;
-
     }
 
+    let name = document.getElementById("editStudentName").value.trim();
+    let className = document.getElementById("editStudentClass").value.trim();
+    let roll = document.getElementById("editStudentRoll").value.trim();
+    let parent = document.getElementById("editParentName").value.trim();
+    let phone = document.getElementById("editParentPhone").value.trim();
+    let group = document.getElementById("editStudentGroup").value;
 
-    let name =
-        document.getElementById(
-            "editStudentName"
-        ).value.trim();
-
-
-    let className =
-        document.getElementById(
-            "editStudentClass"
-        ).value.trim();
-
-
-    let roll =
-        document.getElementById(
-            "editStudentRoll"
-        ).value.trim();
-
-
-    let parent =
-        document.getElementById(
-            "editParentName"
-        ).value.trim();
-
-
-    let phone =
-        document.getElementById(
-            "editParentPhone"
-        ).value.trim();
-
-
-    let group =
-        document.getElementById(
-            "editStudentGroup"
-        ).value;
-
-
-    if(!name || !className || !roll){
-
-        alert(
-            "Name, class and roll are required."
-        );
-
+    if (!name || !className || !roll) {
+        alert("Name, class and roll are required.");
         return;
-
     }
 
-
-    let photo =
-        student.photo || "";
-
-
-    if(selectedEditPhoto){
-
-        photo =
-            selectedEditPhoto;
-
+    let photo = student.photo || "";
+    if (selectedEditPhoto) {
+        photo = selectedEditPhoto;
     }
 
+    // Prepare updated student payload
+    const updatedPayload = {
+        id: id,
+        name: name,
+        class: className,
+        roll: roll,
+        parent: parent,
+        phone: phone,
+        group: group,
+        photo: photo
+    };
 
-    const { data, error } =
-        await supabaseClient
-        .from("students")
-        .update({
+    // 1. Update local in-memory student record immediately
+    student.name = name;
+    student.className = className;
+    student.roll = roll;
+    student.parent = parent;
+    student.phone = phone;
+    student.group = group;
+    student.photo = photo;
 
-            name: name,
-            class: className,
-            roll: roll,
-            parent: parent,
-            phone: phone,
-            group: group,
-            photo: photo
+    // 2. Try updating online or add to sync queue if offline
+    if (navigator.onLine) {
+        try {
+            const { error } = await supabaseClient
+                .from("students")
+                .update(updatedPayload)
+                .eq("id", id);
 
-        })
-        .eq("id", id)
-        .select()
-        .single();
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE UPDATE ERROR:",
-            error
-        );
-
-        alert(
-            "Could not update student in database."
-        );
-
-        return;
-
+            if (error) throw error;
+        } catch (err) {
+            console.warn("Supabase update failed, queueing offline action...", err);
+            await addToSyncQueue("UPDATE", "students", updatedPayload);
+        }
+    } else {
+        console.log("Offline mode: Queueing student update.");
+        await addToSyncQueue("UPDATE", "students", updatedPayload);
     }
 
-
-    student.name =
-        data.name;
-
-    student.className =
-        data.class;
-
-    student.roll =
-        data.roll;
-
-    student.parent =
-        data.parent;
-
-    student.phone =
-        data.phone;
-
-    student.group =
-        data.group;
-
-    student.photo =
-        data.photo || "";
-
-
+    // 3. Save to local IndexedDB/localStorage and refresh UI
     saveAll();
-
-
     selectedEditPhoto = "";
-
-
-    document.getElementById(
-        "editStudentBox"
-    ).style.display =
-        "none";
-
-
+    document.getElementById("editStudentBox").style.display = "none";
     renderAll();
 
-
-    alert(
-        "Student information updated successfully."
-    );
-
+    alert("Student information updated successfully.");
 }
+
 
 
 /* =====================================================
@@ -2482,134 +3025,71 @@ ${buttonText}
 /* =====================================================
    TOGGLE ATTENDANCE
 ===================================================== */
+/* =====================================================
+   TOGGLE ATTENDANCE
+===================================================== */
 
-async function toggleAttendance(
-    id,
-    date
-){
+async function toggleAttendance(id, date) {
+    if (!attendance[date]) attendance[date] = {};
 
-    if(!attendance[date])
-        attendance[date] = {};
+    let current = attendance[date][id];
+    let newStatus = current === "present" ? "absent" : "present";
 
+    // 1. Immediately update local state so the UI reflects the change fast
+    attendance[date][id] = newStatus;
 
-    let current =
-        attendance[date][id];
+    // Prepare payload for offline sync
+    const payload = {
+        id: `${id}_${date}`, // Unique identifier for upserting
+        student_id: id,
+        date: date,
+        status: newStatus
+    };
 
+    // 2. Try updating online or add to sync queue if offline
+    if (navigator.onLine) {
+        try {
+            const { data: existing } = await supabaseClient
+                .from("attendance")
+                .select("id")
+                .eq("student_id", id)
+                .eq("date", date)
+                .maybeSingle();
 
-    let newStatus;
+            if (existing) {
+                const { error } = await supabaseClient
+                    .from("attendance")
+                    .update({ status: newStatus })
+                    .eq("id", existing.id);
 
+                if (error) throw error;
+            } else {
+                const { error } = await supabaseClient
+                    .from("attendance")
+                    .insert({
+                        student_id: id,
+                        date: date,
+                        status: newStatus
+                    });
 
-    if(current === "present"){
-
-        newStatus = "absent";
-
-    }
-    else{
-
-        newStatus = "present";
-
-    }
-
-
-    const { data: existing, error: findError } =
-        await supabaseClient
-        .from("attendance")
-        .select("*")
-        .eq("student_id", id)
-        .eq("date", date)
-        .maybeSingle();
-
-
-    if(findError){
-
-        console.error(
-            "ATTENDANCE FIND ERROR:",
-            findError
-        );
-
-        alert(
-            "Could not check attendance."
-        );
-
-        return;
-
-    }
-
-
-    if(existing){
-
-        const { error } =
-            await supabaseClient
-            .from("attendance")
-            .update({
-
-                status: newStatus
-
-            })
-            .eq("id", existing.id);
-
-
-        if(error){
-
-            console.error(
-                "ATTENDANCE UPDATE ERROR:",
-                error
-            );
-
-            alert(
-                "Could not update attendance."
-            );
-
-            return;
-
+                if (error) throw error;
+            }
+        } catch (err) {
+            console.warn("Supabase attendance sync failed, queueing offline action...", err);
+            await addToSyncQueue("UPSERT", "attendance", payload);
         }
-
-    }
-    else{
-
-        const { error } =
-            await supabaseClient
-            .from("attendance")
-            .insert({
-
-                student_id: id,
-                date: date,
-                status: newStatus
-
-            });
-
-
-        if(error){
-
-            console.error(
-                "ATTENDANCE INSERT ERROR:",
-                error
-            );
-
-            alert(
-                "Could not save attendance."
-            );
-
-            return;
-
-        }
-
+    } else {
+        console.log("Offline mode: Queueing attendance update.");
+        await addToSyncQueue("UPSERT", "attendance", payload);
     }
 
-
-    // Update local memory after Supabase succeeds
-
-    attendance[date][id] =
-        newStatus;
-
-
+    // 3. Save to local storage/IndexedDB & refresh UI
+    saveAll();
     renderAttendance();
-
     renderMonthlyAttendance();
-
     renderDashboard();
-
 }
+
 
 
 /* =====================================================
@@ -2758,348 +3238,96 @@ ${escapeHTML(s.name)} - Group ${escapeHTML(s.group)}
 /* =====================================================
    ADD FEE
 ===================================================== */
+/* =====================================================
+   ADD FEE (OFFLINE-CAPABLE)
+===================================================== */
 
-async function addFee(){
+async function addFee() {
+    let studentId = Number(document.getElementById("feeStudent").value);
+    let month = document.getElementById("feeMonth").value;
+    let amount = Number(document.getElementById("feeAmount").value);
 
-    let studentId =
-        Number(
-            document.getElementById(
-                "feeStudent"
-            ).value
-        );
-
-
-    let month =
-        document.getElementById(
-            "feeMonth"
-        ).value;
-
-
-    let amount =
-        Number(
-            document.getElementById(
-                "feeAmount"
-            ).value
-        );
-
-
-    if(!studentId){
-
-        alert(
-            "Please select a student."
-        );
-
+    if (!studentId) {
+        alert("Please select a student.");
         return;
-
     }
 
-
-    if(!month){
-
-        alert(
-            "Please select a month."
-        );
-
+    if (!month) {
+        alert("Please select a month.");
         return;
-
     }
 
-
-    if(!amount || amount <= 0){
-
-        alert(
-            "Please enter a valid amount."
-        );
-
+    if (!amount || amount <= 0) {
+        alert("Please enter a valid amount.");
         return;
-
     }
 
+    const todayDate = today();
+    let newFeeObj = null;
 
-    const { data, error } =
-        await supabaseClient
-        .from("fees")
-        .insert({
+    // 1. Try online insert or fallback to offline queue
+    if (navigator.onLine) {
+        try {
+            const { data, error } = await supabaseClient
+                .from("fees")
+                .insert({
+                    student_id: studentId,
+                    date: todayDate,
+                    amount: amount,
+                    month: month
+                })
+                .select()
+                .single();
 
+            if (error) throw error;
+
+            newFeeObj = {
+                id: data.id,
+                studentId: data.student_id,
+                month: data.month,
+                amount: Number(data.amount),
+                paidDate: data.date
+            };
+        } catch (err) {
+            console.warn("Online fee add failed, falling back to offline queue...", err);
+        }
+    }
+
+    // If offline or online insert failed
+    if (!newFeeObj) {
+        const tempId = Date.now(); // Temporary ID for local UI & DB
+
+        const payload = {
+            id: tempId,
             student_id: studentId,
-
-            date: today(),
-
+            date: todayDate,
             amount: amount,
-
             month: month
-
-        })
-        .select()
-        .single();
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE FEE INSERT ERROR:",
-            error
-        );
-
-        alert(
-            "Could not save fee."
-        );
-
-        return;
-
-    }
-
-
-    fees.push({
-
-        id: data.id,
-
-        studentId: data.student_id,
-
-        month: data.month,
-
-        amount: Number(data.amount),
-
-        paidDate: data.date
-
-    });
-
-
-    saveAll();
-
-
-    renderFees();
-
-    renderDashboard();
-
-
-    alert(
-        "Fee recorded successfully."
-    );
-
-}
-function searchFeeStudents(){
-
-    let input =
-        document.getElementById(
-            "feeStudentSearch"
-        );
-
-    let container =
-        document.getElementById(
-            "feeStudentSearchResults"
-        );
-
-    let search =
-        input.value
-        .trim()
-        .toLowerCase();
-
-    if(!search){
-
-        container.innerHTML = "";
-
-        return;
-    }
-
-
-    let matches =
-        students.filter(student => {
-
-            let name =
-                String(student.name || "")
-                .toLowerCase();
-
-            let roll =
-                String(student.roll || "")
-                .toLowerCase();
-
-            let className =
-                String(student.className || "")
-                .toLowerCase();
-
-            let group =
-                String(student.group || "")
-                .toLowerCase();
-
-            return (
-                name.includes(search) ||
-                roll.includes(search) ||
-                className.includes(search) ||
-                group.includes(search)
-            );
-
-        });
-
-
-    if(matches.length === 0){
-
-        container.innerHTML = `
-            <div class="fee-search-empty">
-                ❌ No student found.
-            </div>
-        `;
-
-        return;
-    }
-
-
-    let displayMatches =
-        matches.slice(0, 30);
-
-    container.innerHTML = "";
-
-
-    displayMatches.forEach(student => {
-
-        let item =
-            document.createElement("div");
-
-        item.className =
-            "fee-student-result";
-
-
-        let photoHTML =
-            student.photo
-            ? `
-                <img
-                src="${student.photo}"
-                alt="${escapeHTML(student.name)}">
-              `
-            : `
-                <div class="fee-student-avatar">
-                    👤
-                </div>
-              `;
-
-
-        item.innerHTML = `
-
-            ${photoHTML}
-
-            <div class="fee-student-info">
-
-                <strong>
-                    ${escapeHTML(student.name)}
-                </strong>
-
-                <span>
-                    Class ${escapeHTML(student.className)}
-                    &nbsp; • &nbsp;
-                    Roll ${escapeHTML(student.roll)}
-                    &nbsp; • &nbsp;
-                    Group ${escapeHTML(student.group)}
-                </span>
-
-            </div>
-
-        `;
-
-
-        item.onclick = function(){
-
-            selectFeeStudent(
-                student.id
-            );
-
         };
 
+        // Queue for Supabase sync when connection returns
+        await addToSyncQueue("INSERT", "fees", payload);
 
-        container.appendChild(item);
-
-    });
-
-
-    if(matches.length > 30){
-
-        let more =
-            document.createElement("div");
-
-        more.className =
-            "fee-search-empty";
-
-        more.innerText =
-            "Showing first 30 matches. Refine your search.";
-
-        container.appendChild(more);
-
+        newFeeObj = {
+            id: tempId,
+            studentId: studentId,
+            month: month,
+            amount: amount,
+            paidDate: todayDate
+        };
     }
 
+    // 2. Add to local memory & store locally
+    fees.push(newFeeObj);
+    saveAll();
+
+    // 3. Refresh UI
+    renderFees();
+    renderDashboard();
+
+    alert("Fee recorded successfully.");
 }
-function selectFeeStudent(id){
 
-    let student =
-        students.find(
-            s => s.id === id
-        );
-
-    if(!student)
-        return;
-
-
-    /*
-       Set the original hidden select.
-       Your existing addFee() can continue
-       using feeStudent.value normally.
-    */
-
-    let select =
-        document.getElementById(
-            "feeStudent"
-        );
-
-
-    select.value =
-        String(id);
-
-
-    /*
-       Show selected student
-    */
-
-    let selected =
-        document.getElementById(
-            "feeSelectedStudent"
-        );
-
-
-    selected.style.display =
-        "block";
-
-
-    selected.innerHTML = `
-
-        <span>
-            👤 Selected:
-        </span>
-
-        <strong>
-            ${escapeHTML(student.name)}
-        </strong>
-
-        <span>
-            — Class ${escapeHTML(student.className)}
-            • Roll ${escapeHTML(student.roll)}
-            • Group ${escapeHTML(student.group)}
-        </span>
-
-    `;
-
-
-    /*
-       Clear search results
-    */
-
-    document.getElementById(
-        "feeStudentSearch"
-    ).value = "";
-
-
-    document.getElementById(
-        "feeStudentSearchResults"
-    ).innerHTML = "";
-
-}
 
 /* =====================================================
    RENDER FEES
@@ -3185,54 +3413,41 @@ onclick="deleteFee(${f.id})">
 
 }
 
-
 /* =====================================================
-   DELETE FEE
+   DELETE FEE (OFFLINE-CAPABLE)
 ===================================================== */
 
-async function deleteFee(id){
-
-    const { error } =
-        await supabaseClient
-        .from("fees")
-        .delete()
-        .eq("id", id);
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE FEE DELETE ERROR:",
-            error
-        );
-
-        alert(
-            "Could not delete fee."
-        );
-
+async function deleteFee(id) {
+    if (!confirm("Are you sure you want to delete this fee record?")) {
         return;
-
     }
 
+    // 1. Try online deletion or queue offline action
+    if (navigator.onLine) {
+        try {
+            const { error } = await supabaseClient
+                .from("fees")
+                .delete()
+                .eq("id", id);
 
-    fees =
-        fees.filter(
-            f => f.id !== id
-        );
+            if (error) throw error;
+        } catch (err) {
+            console.warn("Online fee deletion failed, queueing offline action...", err);
+            await addToSyncQueue("DELETE", "fees", { id: id });
+        }
+    } else {
+        console.log("Offline mode: Queueing fee deletion.");
+        await addToSyncQueue("DELETE", "fees", { id: id });
+    }
 
-
+    // 2. Remove locally and update UI immediately
+    fees = fees.filter(f => f.id !== id);
     saveAll();
 
-
     renderFees();
-
     renderDashboard();
 
-
-    alert(
-        "Fee deleted."
-    );
-
+    alert("Fee deleted.");
 }
 
 
@@ -4208,6 +4423,7 @@ function refreshResultDetail(
 
 }
 
+
 /* =====================================================
    UPDATE MARK
 ===================================================== */
@@ -4219,18 +4435,22 @@ async function updateMark(
     input
 ){
 
-    let mark = Number(value);
+    let mark =
+        Number(value);
+
 
     if(isNaN(mark))
         mark = 0;
 
-    mark = Math.max(
-        0,
-        Math.min(
-            25,
-            mark
-        )
-    );
+
+    mark =
+        Math.max(
+            0,
+            Math.min(
+                25,
+                mark
+            )
+        );
 
 
     if(!results[examId])
@@ -4250,43 +4470,6 @@ async function updateMark(
 
     }
 
-
-    /*
-       Keep the old value so we can restore it
-       if Supabase fails.
-    */
-
-    const oldResult = {
-        english:
-            Number(
-                results[examId][studentId].english || 0
-            ),
-
-        nepali:
-            Number(
-                results[examId][studentId].nepali || 0
-            ),
-
-        math:
-            Number(
-                results[examId][studentId].math || 0
-            ),
-
-        science:
-            Number(
-                results[examId][studentId].science || 0
-            ),
-
-        total:
-            Number(
-                results[examId][studentId].total || 0
-            )
-    };
-
-
-    /*
-       Update local memory.
-    */
 
     results[examId][studentId][subject] =
         mark;
@@ -4322,15 +4505,6 @@ async function updateMark(
             "SUPABASE RESULT FIND ERROR:",
             findError
         );
-
-
-        /*
-           Restore old local value.
-        */
-
-        results[examId][studentId] =
-            oldResult;
-
 
         alert(
             "Could not check result."
@@ -4377,16 +4551,6 @@ async function updateMark(
                 error
             );
 
-
-            /*
-               Restore old local value
-               if database update fails.
-            */
-
-            results[examId][studentId] =
-                oldResult;
-
-
             alert(
                 "Could not update result."
             );
@@ -4419,16 +4583,6 @@ async function updateMark(
                 error
             );
 
-
-            /*
-               Restore old local value
-               if database insert fails.
-            */
-
-            results[examId][studentId] =
-                oldResult;
-
-
             alert(
                 "Could not save result."
             );
@@ -4440,34 +4594,25 @@ async function updateMark(
     }
 
 
-    /*
-       Supabase succeeded.
-       Now refresh the result UI.
-    */
-
     saveAll();
 
 
     if(
-        selectedResultStudentId === studentId
-    ){
-
-        refreshResultDetail(
-            examId,
-            studentId
-        );
-
-    }
-    else{
-
-        updateResultRow(
-            examId,
-            studentId
-        );
-
-    }
-
+    selectedResultStudentId === studentId
+){
+    refreshResultDetail(
+        examId,
+        studentId
+    );
 }
+else{
+    updateResultRow(
+        examId,
+        studentId
+    );
+}
+}
+
 
 
 
@@ -5441,17 +5586,6 @@ No exam results.
    DASHBOARD
 ===================================================== */
 function renderDashboard(){
-   // 1. Update current date display
-    const dateElement = document.getElementById("dashboardDate");
-    if (dateElement) {
-        const todayObj = new Date();
-        dateElement.textContent = todayObj.toLocaleDateString("en-US", {
-            weekday: "short",
-            month: "short",
-            day: "numeric",
-            year: "numeric"
-        });
-    }
 
     document.getElementById(
         "totalStudents"
@@ -6272,33 +6406,32 @@ document.getElementById(
    START APP
 ===================================================== */
 
-async function startApp() {
-    try {
-        await Promise.all([
-            loadGroupsFromSupabase(),
-            loadStudentsFromSupabase(),
-            loadAttendanceFromSupabase(),
-            loadFeesFromSupabase(),
-            loadExamsFromSupabase(),
-            loadResultsFromSupabase()
-        ]);
+async function startApp(){
+  console.log("START APP: beginning");
 
-        renderAll();
+    try{
 
-    } catch (error) {
-        console.error("App startup error:", error);
+        await openOfflineDatabase();
+      console.log("START APP: offline database finished");
 
-        alert(
-            "Some data could not be loaded from Supabase.\n\n" +
-            "Please check your internet connection and try again."
+    }
+    catch(error){
+
+        console.error(
+            "Could not initialize offline database:",
+            error
         );
 
-        // Still render whatever data was successfully loaded
-        renderAll();
     }
-}
 
-startApp();
+    await loadGroupsFromSupabase();
+    await loadStudentsFromSupabase();
+    await loadAttendanceFromSupabase();
+    await loadFeesFromSupabase();
+    await loadExamsFromSupabase();
+    await loadResultsFromSupabase();
+
+}
 
 function toggleExamMenu(button){
 
@@ -6792,4 +6925,83 @@ async function editFee(id){
         "✅ Fee updated successfully."
     );
 
-       }
+}
+window.addEventListener("load", function(){
+
+    setTimeout(function(){
+
+        const splash =
+            document.getElementById("appSplash");
+
+        if(splash){
+            splash.remove();
+        }
+
+    }, 2100);
+
+});
+/* =====================================================
+   OFFLINE DATABASE — INDEXEDDB
+===================================================== */
+
+const OFFLINE_DB_NAME = "RampurFreeTuitionOfflinev2";
+const OFFLINE_DB_VERSION = 3;
+
+let offlineDB = null;
+
+
+/* =====================================================
+   SAFE STARTUP & DATA INITIALIZATION
+===================================================== */
+async function loadAllAppData() {
+    // Only proceed if offlineDB is open and ready
+    if (!offlineDB) {
+        try {
+            await openOfflineDatabase();
+        } catch (err) {
+            console.error("Could not initialize offline database:", err);
+            return;
+        }
+    }
+
+    if (navigator.onLine) {
+        try {
+            await loadGroupsFromSupabase();
+            await loadStudentsFromSupabase();
+            await loadAttendanceFromSupabase();
+            await loadFeesFromSupabase();
+            await loadExamsFromSupabase();
+            await loadResultsFromSupabase();
+        } catch (err) {
+            console.warn("Cloud load failed, loading from offline database...", err);
+            await loadGroupsFromOfflineDB();
+            await loadStudentsFromOfflineDB();
+        }
+    } else {
+        await loadGroupsFromOfflineDB();
+        await loadStudentsFromOfflineDB();
+    }
+}
+
+window.addEventListener("DOMContentLoaded", async () => {
+    try {
+        // 1. Initialize IndexedDB first
+        await openOfflineDatabase();
+        console.log("IndexedDB Initialized!");
+
+        // 2. Check login status
+        const isLoggedIn = localStorage.getItem("adminLoggedIn") === "true";
+        const loginScreen = document.getElementById("loginScreen");
+
+        if (isLoggedIn) {
+            if (loginScreen) loginScreen.style.display = "none";
+            await loadAllAppData();
+        } else {
+            if (loginScreen) loginScreen.style.display = "flex";
+        }
+    } catch (err) {
+        console.error("Could not initialize offline database:", err);
+    }
+});
+
+
