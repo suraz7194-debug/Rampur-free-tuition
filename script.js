@@ -70,11 +70,9 @@ const supabaseClient = supabase.createClient(
 
 
 /* =====================================================
-   ADMIN LOGIN
+   ADMIN LOGIN & SESSION (OFFLINE READY)
 ===================================================== */
-/* =====================================================
-   3. AUTHENTICATION (ONLINE & OFFLINE)
-===================================================== */
+
 async function adminLogin() {
     const emailInput = document.getElementById("loginEmail");
     const passwordInput = document.getElementById("loginPassword");
@@ -100,52 +98,63 @@ async function adminLogin() {
 
             if (error) throw error;
 
-            // Login successful
+            // Save login state locally so offline access works later
             localStorage.setItem("adminLoggedIn", "true");
             document.getElementById("loginScreen").style.display = "none";
             await loadAllAppData();
             return;
         } catch (err) {
-            console.warn("Supabase auth error, checking offline credentials...", err.message);
+            console.warn("Supabase auth failed or offline, trying offline check...", err.message);
         }
     }
 
-    // 2. Offline Fallback Check (Change email/pass if needed)
+    // 2. Offline Fallback Check (Allows login without internet)
     if (email === "admin@tuition.com" && password === "123456") {
         localStorage.setItem("adminLoggedIn", "true");
         document.getElementById("loginScreen").style.display = "none";
         await loadAllAppData();
     } else {
-        if (message) message.innerText = "Invalid login credentials.";
+        if (message) message.innerText = "Invalid credentials or network unavailable.";
     }
 }
 
 function adminLogout() {
     localStorage.removeItem("adminLoggedIn");
-    if (typeof supabaseClient !== "undefined" && supabaseClient.auth) {
+    if (navigator.onLine && typeof supabaseClient !== "undefined" && supabaseClient.auth) {
         supabaseClient.auth.signOut();
     }
     const loginScreen = document.getElementById("loginScreen");
     if (loginScreen) loginScreen.style.display = "flex";
 }
 
-
 /* =====================================================
    CHECK ADMIN SESSION
 ===================================================== */
 
 async function checkAdminSession() {
+    const isLoggedInLocally = localStorage.getItem("adminLoggedIn") === "true";
 
-    const { data: { session } } =
-        await supabaseClient.auth.getSession();
+    if (isLoggedInLocally) {
+        const loginScreen = document.getElementById("loginScreen");
+        if (loginScreen) loginScreen.style.display = "none";
+        return;
+    }
 
-    if (session) {
-        document.getElementById("loginScreen").style.display = "none";
+    if (navigator.onLine && typeof supabaseClient !== "undefined") {
+        try {
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (session) {
+                localStorage.setItem("adminLoggedIn", "true");
+                const loginScreen = document.getElementById("loginScreen");
+                if (loginScreen) loginScreen.style.display = "none";
+            }
+        } catch (err) {
+            console.warn("Could not check online session:", err);
+        }
     }
 }
 
 checkAdminSession();
-
 
 
 
@@ -1452,531 +1461,212 @@ document.addEventListener("click", function(event){
 /* =========================
    ADD GROUP
 ========================= */
+/* =====================================================
+   GROUPS (OFFLINE READY)
+===================================================== */
 
-async function addGroup(){
+async function addGroup() {
+    let input = document.getElementById("newGroupName");
+    let name = input.value.trim();
 
-    let input =
-        document.getElementById(
-            "newGroupName"
-        );
-
-    let name =
-        input.value.trim();
-
-
-    if(!name){
-
-        alert(
-            "Please enter a group name."
-        );
-
+    if (!name) {
+        alert("Please enter a group name.");
         return;
-
     }
-
 
     /* Check duplicate */
+    let exists = groups.some(
+        g => g.toLowerCase() === name.toLowerCase()
+    );
 
-    let exists =
-        groups.some(
-            g =>
-                g.toLowerCase() ===
-                name.toLowerCase()
-        );
-
-
-    if(exists){
-
-        alert(
-            "This group already exists."
-        );
-
+    if (exists) {
+        alert("This group already exists.");
         return;
-
     }
 
+    let groupObj = null;
 
-    /* =========================
-       SAVE GROUP TO SUPABASE
-    ========================= */
+    // 1. Try Online Insert or Fallback to Offline Queue
+    if (navigator.onLine) {
+        try {
+            const { data, error } = await supabaseClient
+                .from("groups")
+                .insert({ name: name })
+                .select()
+                .single();
 
-    const { data, error } =
-        await supabaseClient
-        .from("groups")
-        .insert({
+            if (error) throw error;
 
-            name: name
-
-        })
-        .select()
-        .single();
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE GROUP INSERT ERROR:",
-            error
-        );
-
-        alert(
-            "Could not add group:\n" +
-            error.message
-        );
-
-        return;
-
+            groupObj = { id: data.id, name: data.name };
+        } catch (err) {
+            console.warn("Online group add failed, queueing offline action...", err);
+        }
     }
 
+    if (!groupObj) {
+        const tempId = Date.now(); // Local temporary ID
+        const payload = { id: tempId, name: name };
+
+        await addToSyncQueue("INSERT", "groups", payload);
+        groupObj = payload;
+    }
 
     /* =========================
        UPDATE LOCAL STATE
     ========================= */
+    groups.push(groupObj.name);
+    groupIds[groupObj.name] = groupObj.id;
 
-    groups.push(
-        data.name
-    );
-groupIds[data.name] = data.id;
-
-    studentGroup =
-        data.name;
-
-    attendanceGroup =
-        data.name;
-
-    resultGroup =
-        data.name;
-
+    studentGroup = groupObj.name;
+    attendanceGroup = groupObj.name;
+    resultGroup = groupObj.name;
 
     input.value = "";
 
-
+    saveAll();
     renderAll();
 
-
-    alert(
-        "Group '" +
-        data.name +
-        "' added successfully."
-    );
-
+    alert("Group '" + groupObj.name + "' added successfully.");
 }
 
-
 /* =========================
-   EDIT GROUP
+   EDIT GROUP (OFFLINE READY)
 ========================= */
-async function editGroup(groupId){
+async function editGroup(groupId) {
+    let oldName = Object.keys(groupIds).find(
+        name => String(groupIds[name]) === String(groupId)
+    );
 
-    /* Find group by Supabase ID */
-    let oldName =
-        Object.keys(groupIds)
-        .find(
-            name =>
-                String(groupIds[name]) ===
-                String(groupId)
-        );
-
-    if(!oldName){
-        alert(
-            "Group not found."
-        );
+    if (!oldName) {
+        alert("Group not found.");
         return;
     }
 
+    let newName = prompt("Enter new name for group:", oldName);
+    if (newName === null) return;
+    newName = newName.trim();
 
-    let newName =
-        prompt(
-            "Enter new name for group:",
-            oldName
-        );
-
-
-    if(newName === null)
+    if (!newName) {
+        alert("Group name cannot be empty.");
         return;
-
-
-    newName =
-        newName.trim();
-
-
-    if(!newName){
-
-        alert(
-            "Group name cannot be empty."
-        );
-
-        return;
-
     }
-
 
     /* Check duplicate */
-
-    let duplicate =
-        groups.some(
-            g =>
-                g !== oldName &&
-                g.toLowerCase() ===
-                newName.toLowerCase()
-        );
-
-
-    if(duplicate){
-
-        alert(
-            "A group with this name already exists."
-        );
-
-        return;
-
-    }
-
-
-    /* =========================
-       UPDATE STUDENTS
-    ========================= */
-
-    let response =
-        await supabaseClient
-        .from("students")
-        .update({
-            group: newName
-        })
-        .eq("group", oldName);
-
-
-    if(response.error){
-
-        console.error(
-            "SUPABASE STUDENT GROUP UPDATE ERROR:",
-            response.error
-        );
-
-        alert(
-            "Could not update students:\n" +
-            response.error.message
-        );
-
-        return;
-
-    }
-
-
-    /* =========================
-       UPDATE GROUP BY ID
-    ========================= */
-
-    response =
-        await supabaseClient
-        .from("groups")
-        .update({
-            name: newName
-        })
-        .eq("id", groupId);
-
-
-    if(response.error){
-
-        console.error(
-            "SUPABASE GROUP UPDATE ERROR:",
-            response.error
-        );
-
-        /* Try to move students back */
-
-        await supabaseClient
-        .from("students")
-        .update({
-            group: oldName
-        })
-        .eq("group", newName);
-
-
-        alert(
-            "Could not rename group:\n" +
-            response.error.message
-        );
-
-        return;
-
-    }
-
-
-    /* =========================
-       UPDATE LOCAL STUDENTS
-    ========================= */
-
-    students.forEach(student => {
-
-        if(student.group === oldName){
-
-            student.group =
-                newName;
-
-        }
-
-    });
-
-
-    /* =========================
-       UPDATE LOCAL GROUP LIST
-    ========================= */
-
-    let index =
-        groups.indexOf(oldName);
-
-
-    if(index !== -1){
-
-        groups[index] =
-            newName;
-
-    }
-
-
-    /* Update ID mapping */
-
-    delete groupIds[oldName];
-
-    groupIds[newName] =
-        groupId;
-
-
-    /* =========================
-       UPDATE SELECTED GROUPS
-    ========================= */
-
-    if(studentGroup === oldName)
-        studentGroup = newName;
-
-    if(attendanceGroup === oldName)
-        attendanceGroup = newName;
-
-    if(resultGroup === oldName)
-        resultGroup = newName;
-
-
-    renderAll();
-
-
-    alert(
-        "✅ Group renamed successfully."
+    let duplicate = groups.some(
+        g => g !== oldName && g.toLowerCase() === newName.toLowerCase()
     );
 
+    if (duplicate) {
+        alert("A group with this name already exists.");
+        return;
+    }
+
+    // 1. Online Sync or Offline Queueing
+    if (navigator.onLine) {
+        try {
+            await supabaseClient.from("students").update({ group: newName }).eq("group", oldName);
+            await supabaseClient.from("groups").update({ name: newName }).eq("id", groupId);
+        } catch (err) {
+            console.warn("Online group update failed, queueing offline action...", err);
+            await addToSyncQueue("UPDATE", "groups", { id: groupId, name: newName });
+        }
+    } else {
+        await addToSyncQueue("UPDATE", "groups", { id: groupId, name: newName });
+    }
+
+    /* =========================
+       UPDATE LOCAL STUDENTS & GROUPS
+    ========================= */
+    students.forEach(student => {
+        if (student.group === oldName) {
+            student.group = newName;
+        }
+    });
+
+    let index = groups.indexOf(oldName);
+    if (index !== -1) {
+        groups[index] = newName;
+    }
+
+    delete groupIds[oldName];
+    groupIds[newName] = groupId;
+
+    if (studentGroup === oldName) studentGroup = newName;
+    if (attendanceGroup === oldName) attendanceGroup = newName;
+    if (resultGroup === oldName) resultGroup = newName;
+
+    saveAll();
+    renderAll();
+
+    alert("✅ Group renamed successfully.");
 }
 
 /* =========================
-   DELETE GROUP
+   DELETE GROUP (OFFLINE READY)
 ========================= */
-async function deleteGroup(groupId){
-
-    /* Find group name from Supabase ID */
-
-    let group =
-        Object.keys(groupIds)
-        .find(
-            name =>
-                String(groupIds[name]) ===
-                String(groupId)
-        );
-
-
-    if(!group){
-
-        alert(
-            "Group not found."
-        );
-
-        return;
-
-    }
-
-
-    if(groups.length <= 1){
-
-        alert(
-            "You must keep at least one group."
-        );
-
-        return;
-
-    }
-
-
-    let studentCount =
-        students.filter(
-            s => s.group === group
-        ).length;
-
-
-    let message =
-        "Delete group '" +
-        group +
-        "'?";
-
-
-    if(studentCount > 0){
-
-        message +=
-            "\n\nThis group has " +
-            studentCount +
-            " student(s)." +
-            "\nDeleting the group will move those students to another group.";
-
-    }
-
-
-    if(!confirm(message))
-        return;
-
-
-    /* =========================
-       CHOOSE REPLACEMENT
-    ========================= */
-
-    let replacement =
-        groups.find(
-            g => g !== group
-        );
-
-
-    /* =========================
-       MOVE STUDENTS
-    ========================= */
-
-    if(studentCount > 0){
-
-        let response =
-            await supabaseClient
-            .from("students")
-            .update({
-                group: replacement
-            })
-            .eq("group", group);
-
-
-        if(response.error){
-
-            console.error(
-                "SUPABASE STUDENT GROUP MOVE ERROR:",
-                response.error
-            );
-
-            alert(
-                "Could not move students:\n" +
-                response.error.message
-            );
-
-            return;
-
-        }
-
-    }
-
-
-    /* =========================
-       DELETE GROUP BY ID
-    ========================= */
-
-    const { error } =
-        await supabaseClient
-        .from("groups")
-        .delete()
-        .eq("id", groupId);
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE GROUP DELETE ERROR:",
-            error
-        );
-
-
-        /* Try to move students back */
-
-        if(studentCount > 0){
-
-            await supabaseClient
-            .from("students")
-            .update({
-                group: group
-            })
-            .eq("group", replacement);
-
-        }
-
-
-        alert(
-            "Could not delete group:\n" +
-            error.message
-        );
-
-        return;
-
-    }
-
-
-    /* =========================
-       UPDATE LOCAL STUDENTS
-    ========================= */
-
-    if(studentCount > 0){
-
-        students.forEach(student => {
-
-            if(student.group === group){
-
-                student.group =
-                    replacement;
-
-            }
-
-        });
-
-    }
-
-
-    /* =========================
-       REMOVE LOCAL GROUP
-    ========================= */
-
-    groups =
-        groups.filter(
-            g => g !== group
-        );
-
-
-    /* Remove ID mapping */
-
-    delete groupIds[group];
-
-
-    /* =========================
-       FIX SELECTED GROUPS
-    ========================= */
-
-    if(studentGroup === group)
-        studentGroup = replacement;
-
-    if(attendanceGroup === group)
-        attendanceGroup = replacement;
-
-    if(resultGroup === group)
-        resultGroup = replacement;
-
-
-    renderAll();
-
-
-    alert(
-        "✅ Group deleted successfully.\n" +
-        "Students were moved to " +
-        replacement +
-        "."
+async function deleteGroup(groupId) {
+    let group = Object.keys(groupIds).find(
+        name => String(groupIds[name]) === String(groupId)
     );
 
+    if (!group) {
+        alert("Group not found.");
+        return;
+    }
+
+    if (groups.length <= 1) {
+        alert("You must keep at least one group.");
+        return;
+    }
+
+    let studentCount = students.filter(s => s.group === group).length;
+    let message = "Delete group '" + group + "'?";
+
+    if (studentCount > 0) {
+        message += "\n\nThis group has " + studentCount + " student(s).\nDeleting the group will move those students to another group.";
+    }
+
+    if (!confirm(message)) return;
+
+    let replacement = groups.find(g => g !== group);
+
+    // 1. Online Sync or Offline Queueing
+    if (navigator.onLine) {
+        try {
+            if (studentCount > 0) {
+                await supabaseClient.from("students").update({ group: replacement }).eq("group", group);
+            }
+            await supabaseClient.from("groups").delete().eq("id", groupId);
+        } catch (err) {
+            console.warn("Online group deletion failed, queueing offline action...", err);
+            await addToSyncQueue("DELETE", "groups", { id: groupId });
+        }
+    } else {
+        await addToSyncQueue("DELETE", "groups", { id: groupId });
+    }
+
+    /* =========================
+       UPDATE LOCAL STUDENTS & GROUPS
+    ========================= */
+    if (studentCount > 0) {
+        students.forEach(student => {
+            if (student.group === group) {
+                student.group = replacement;
+            }
+        });
+    }
+
+    groups = groups.filter(g => g !== group);
+    delete groupIds[group];
+
+    if (studentGroup === group) studentGroup = replacement;
+    if (attendanceGroup === group) attendanceGroup = replacement;
+    if (resultGroup === group) resultGroup = replacement;
+
+    saveAll();
+    renderAll();
+
+    alert("✅ Group deleted successfully.\nStudents were moved to " + replacement + ".");
 }
 
 /* =====================================================
@@ -3411,6 +3101,115 @@ onclick="deleteFee(${f.id})">
 
     });
 
+}
+/* =====================================================
+   FEE STUDENT SEARCH & SELECTION
+===================================================== */
+
+function searchFeeStudents() {
+    let input = document.getElementById("feeStudentSearch");
+    let container = document.getElementById("feeStudentSearchResults");
+
+    if (!input || !container) return;
+
+    let search = input.value.trim().toLowerCase();
+
+    if (!search) {
+        container.innerHTML = "";
+        return;
+    }
+
+    let matches = (students || []).filter(student => {
+        let name = String(student.name || "").toLowerCase();
+        let roll = String(student.roll || "").toLowerCase();
+        let className = String(student.className || "").toLowerCase();
+        let group = String(student.group || "").toLowerCase();
+
+        return (
+            name.includes(search) ||
+            roll.includes(search) ||
+            className.includes(search) ||
+            group.includes(search)
+        );
+    });
+
+    if (matches.length === 0) {
+        container.innerHTML = `
+            <div class="fee-search-empty">
+                ❌ No student found.
+            </div>
+        `;
+        return;
+    }
+
+    let displayMatches = matches.slice(0, 30);
+    container.innerHTML = "";
+
+    displayMatches.forEach(student => {
+        let item = document.createElement("div");
+        item.className = "fee-student-result";
+
+        let photoHTML = student.photo
+            ? `<img src="${student.photo}" alt="${escapeHTML(student.name)}">`
+            : `<div class="fee-student-avatar">👤</div>`;
+
+        item.innerHTML = `
+            ${photoHTML}
+            <div class="fee-student-info">
+                <strong>${escapeHTML(student.name)}</strong>
+                <span>
+                    Class ${escapeHTML(student.className)}
+                    &nbsp; • &nbsp;
+                    Roll ${escapeHTML(student.roll)}
+                    &nbsp; • &nbsp;
+                    Group ${escapeHTML(student.group)}
+                </span>
+            </div>
+        `;
+
+        item.onclick = function() {
+            selectFeeStudent(student.id);
+        };
+
+        container.appendChild(item);
+    });
+
+    if (matches.length > 30) {
+        let more = document.createElement("div");
+        more.className = "fee-search-empty";
+        more.innerText = "Showing first 30 matches. Refine your search.";
+        container.appendChild(more);
+    }
+}
+
+function selectFeeStudent(id) {
+    let student = (students || []).find(s => s.id === id);
+    if (!student) return;
+
+    let select = document.getElementById("feeStudent");
+    if (select) {
+        select.value = String(id);
+    }
+
+    let selected = document.getElementById("feeSelectedStudent");
+    if (selected) {
+        selected.style.display = "block";
+        selected.innerHTML = `
+            <span>👤 Selected:</span>
+            <strong>${escapeHTML(student.name)}</strong>
+            <span>
+                — Class ${escapeHTML(student.className)}
+                • Roll ${escapeHTML(student.roll)}
+                • Group ${escapeHTML(student.group)}
+            </span>
+        `;
+    }
+
+    let searchInput = document.getElementById("feeStudentSearch");
+    if (searchInput) searchInput.value = "";
+
+    let searchResults = document.getElementById("feeStudentSearchResults");
+    if (searchResults) searchResults.innerHTML = "";
 }
 
 /* =====================================================
@@ -4993,592 +4792,235 @@ function selectHistoryStudent(id){
 /* =====================================================
    STUDENT HISTORY
 ===================================================== */
+function renderStudentHistory() {
 
-function renderStudentHistory(){
-
-    if(!selectedHistoryStudentId){
-
-        document.getElementById(
-            "studentHistoryContent"
-        ).innerHTML = `
-
-<div class="panel">
-
-<div class="empty">
-
-🔎 Search for a student above to view their complete history.
-
-</div>
-
-</div>
-
-`;
-
+    if (!selectedHistoryStudentId) {
+        document.getElementById("studentHistoryContent").innerHTML = `
+            <div class="panel">
+                <div class="empty">
+                    🔎 Search for a student above to view their complete history.
+                </div>
+            </div>
+        `;
         return;
-
     }
 
+    let id = Number(selectedHistoryStudentId);
+    let student = students.find(s => s.id === id);
 
-    let id =
-        Number(
-            selectedHistoryStudentId
-        );
-
-
-    let student =
-        students.find(
-            s => s.id === id
-        );
-
-
-    if(!student){
-
-        document.getElementById(
-            "studentHistoryContent"
-        ).innerHTML = "";
-
+    if (!student) {
+        document.getElementById("studentHistoryContent").innerHTML = "";
         return;
-
     }
 
-
-    let content =
-        document.getElementById(
-            "studentHistoryContent"
-        );
-
+    let content = document.getElementById("studentHistoryContent");
 
     let present = 0;
     let absent = 0;
-
-
     let attendanceRows = "";
 
-
     Object.keys(attendance)
-    .sort()
-    .reverse()
-    .forEach(date=>{
+        .sort()
+        .reverse()
+        .forEach(date => {
+            let status = attendance[date][id];
+            if (!status) return;
 
-        let status =
-            attendance[date][id];
+            if (status === "present") present++;
+            if (status === "absent") absent++;
 
+            attendanceRows += `
+                <tr>
+                    <td>${date}</td>
+                    <td class="${status === "present" ? "present" : "absent"}">
+                        ${status === "present" ? "Present ✓" : "Absent ✗"}
+                    </td>
+                </tr>
+            `;
+        });
 
-        if(!status)
-            return;
-
-
-        if(status === "present")
-            present++;
-
-
-        if(status === "absent")
-            absent++;
-
-
-        attendanceRows += `
-
-<tr>
-
-<td>${date}</td>
-
-<td class="${
-    status === "present"
-    ? "present"
-    : "absent"
-}">
-
-${
-    status === "present"
-    ? "Present ✓"
-    : "Absent ✗"
-}
-
-</td>
-
-</tr>
-
-`;
-
-    });
-
-
-    let totalAttendance =
-        present + absent;
-
-
-    let attendancePercent =
-        totalAttendance === 0
-        ? 0
-        : present / totalAttendance * 100;
-
+    let totalAttendance = present + absent;
+    let attendancePercent = totalAttendance === 0 ? 0 : (present / totalAttendance) * 100;
 
     /* FEE HISTORY */
-
     let feeRows = "";
-
-
     fees
-    .filter(
-        f => f.studentId === id
-    )
-    .slice()
-    .reverse()
-    .forEach(f=>{
+        .filter(f => f.studentId === id)
+        .slice()
+        .reverse()
+        .forEach(f => {
+            feeRows += `
+                <tr>
+                    <td>${f.month}</td>
+                    <td>Rs. ${f.amount}</td>
+                    <td class="paid">Paid</td>
+                    <td>${f.paidDate}</td>
+                </tr>
+            `;
+        });
 
-        feeRows += `
-
-<tr>
-
-<td>${f.month}</td>
-
-<td>Rs. ${f.amount}</td>
-
-<td class="paid">
-Paid
-</td>
-
-<td>${f.paidDate}</td>
-
-</tr>
-
-`;
-
-    });
-
-
-    /* EXAM HISTORY */
-
+    /* EXAM HISTORY (ALL EXAMS SHOWN) */
     let examRows = "";
-
+    let examsTaken = 0;
+    let percentageTotal = 0;
 
     exams
-    .slice()
-    .reverse()
-    .forEach(exam=>{
-
-        let r =
-            results[exam.id]
-            ? results[exam.id][id]
-            : null;
-
-
-        if(!r)
-            return;
-
-
-        let total =
-
-            Number(r.english || 0) +
-            Number(r.nepali || 0) +
-            Number(r.math || 0) +
-            Number(r.science || 0);
-
-
-        let percentage = total;
-
-
-        let grade =
-            getGrade(percentage);
-
-
-        let pass =
-
-            Number(r.english || 0) >= 10 &&
-            Number(r.nepali || 0) >= 10 &&
-            Number(r.math || 0) >= 10 &&
-            Number(r.science || 0) >= 10;
-
-
-        examRows += `
-
-<tr>
-
-<td>${escapeHTML(exam.name)}</td>
-
-<td>${exam.date}</td>
-
-<td>${total}/100</td>
-
-<td>${percentage.toFixed(1)}%</td>
-
-<td>
-
-<span class="${
-    grade === "F"
-    ? "grade-fail"
-    : "grade-good"
-}">
-
-<b>${grade}</b>
-
-</span>
-
-</td>
-
-<td class="${
-    pass
-    ? "present"
-    : "absent"
-}">
-
-${pass ? "PASS" : "FAIL"}
-
-</td>
-
-</tr>
-
-`;
-
-    });
-
-
-   /* SUMMARY */
-
-let totalFees =
-    fees
-    .filter(
-        f => f.studentId === id
-    )
-    .reduce(
-        (sum, f) =>
-            sum + Number(f.amount || 0),
-        0
-    );
-
-
-let examsTaken = 0;
-let percentageTotal = 0;
-
-
-exams.forEach(exam => {
-
-    let r =
-        results[exam.id]
-        ? results[exam.id][id]
-        : null;
-
-    if(!r)
-        return;
-
-    let total =
-
-        Number(r.english || 0) +
-        Number(r.nepali || 0) +
-        Number(r.math || 0) +
-        Number(r.science || 0);
-
-    examsTaken++;
-
-    percentageTotal += total;
-
-});
-
-
-let averagePercentage =
-    examsTaken === 0
-    ? 0
-    : percentageTotal / examsTaken;
-
-
-/* DISPLAY */
-
-content.innerHTML = `
-
-<div class="panel">
-
-<div class="student-profile">
-
-${studentPhotoHTML(
-    student,
-    "student-photo-large"
-)}
-
-<div>
-
-<h3>${escapeHTML(student.name)}</h3>
-
-<p class="small">
-
-Class ${escapeHTML(student.className)}
-
-|
-
-Group ${escapeHTML(student.group)}
-
-|
-
-Roll ${escapeHTML(student.roll)}
-
-</p>
-
-<p class="small">
-
-Parent:
-${escapeHTML(student.parent || "Not provided")}
-
-<br>
-
-Phone:
-${escapeHTML(student.phone || "Not provided")}
-
-<br>
-
-Joined:
-${escapeHTML(student.joined || "Not available")}
-
-</p>
-
-</div>
-
-</div>
-
-</div>
-
-
-<!-- QUICK SUMMARY -->
-
-<div class="history-summary-grid">
-
-<div class="history-summary-card">
-
-<div class="history-summary-icon">
-📅
-</div>
-
-<div>
-
-<span>Attendance</span>
-
-<strong>
-${attendancePercent.toFixed(1)}%
-</strong>
-
-</div>
-
-</div>
-
-
-<div class="history-summary-card">
-
-<div class="history-summary-icon">
-💰
-</div>
-
-<div>
-
-<span>Total Fees</span>
-
-<strong>
-Rs. ${totalFees}
-</strong>
-
-</div>
-
-</div>
-
-
-<div class="history-summary-card">
-
-<div class="history-summary-icon">
-📝
-</div>
-
-<div>
-
-<span>Exams Taken</span>
-
-<strong>
-${examsTaken}
-</strong>
-
-</div>
-
-</div>
-
-
-<div class="history-summary-card">
-
-<div class="history-summary-icon">
-📊
-</div>
-
-<div>
-
-<span>Average</span>
-
-<strong>
-${averagePercentage.toFixed(1)}%
-</strong>
-
-</div>
-
-</div>
-
-</div>
-
-
-<div class="panel">
-
-<h3>📅 Attendance Summary</h3>
-
-<p>
-Present:
-<b class="present">
-${present}
-</b>
-</p>
-
-<p>
-Absent:
-<b class="absent">
-${absent}
-</b>
-</p>
-
-<p>
-Total Recorded:
-<b>
-${totalAttendance}
-</b>
-</p>
-
-<p>
-Attendance:
-<b>
-${attendancePercent.toFixed(1)}%
-</b>
-</p>
-
-<br>
-
-
-<table>
-
-<thead>
-
-<tr>
-<th>Date</th>
-<th>Status</th>
-</tr>
-
-</thead>
-
-<tbody>
-
-${attendanceRows ||
-
-`
-
-<tr>
-
-<td colspan="2"
-class="empty">
-
-No attendance recorded.
-
-</td>
-
-</tr>
-
-`}
-
-</tbody>
-
-</table>
-
-</div>
-
-
-<div class="panel">
-
-<h3>💰 Fee History</h3>
-
-<table>
-
-<thead>
-
-<tr>
-<th>Month</th>
-<th>Amount</th>
-<th>Status</th>
-<th>Paid Date</th>
-</tr>
-
-</thead>
-
-<tbody>
-
-${feeRows ||
-
-`
-
-<tr>
-
-<td colspan="4"
-class="empty">
-
-No fee records.
-
-</td>
-
-</tr>
-
-`}
-
-</tbody>
-
-</table>
-
-</div>
-
-
-<div class="panel">
-
-<h3>📝 Exam History</h3>
-
-<table>
-
-<thead>
-
-<tr>
-<th>Exam</th>
-<th>Date</th>
-<th>Total</th>
-<th>Percentage</th>
-<th>Grade</th>
-<th>Result</th>
-</tr>
-
-</thead>
-
-<tbody>
-
-${examRows ||
-
-`
-
-<tr>
-
-<td colspan="6"
-class="empty">
-
-No exam results.
-
-</td>
-
-</tr>
-
-`}
-
-</tbody>
-
-</table>
-
-</div>
-
-`;
-
+        .slice()
+        .reverse()
+        .forEach(exam => {
+            let r = results[exam.id] ? results[exam.id][id] : null;
+
+            let total = 0;
+            let percentage = 0;
+            let grade = "F";
+            let pass = false;
+
+            if (r) {
+                total =
+                    Number(r.english || 0) +
+                    Number(r.nepali || 0) +
+                    Number(r.math || 0) +
+                    Number(r.science || 0);
+
+                percentage = total;
+                grade = typeof getGrade === "function" ? getGrade(percentage) : "F";
+
+                pass =
+                    Number(r.english || 0) >= 10 &&
+                    Number(r.nepali || 0) >= 10 &&
+                    Number(r.math || 0) >= 10 &&
+                    Number(r.science || 0) >= 10;
+
+                examsTaken++;
+                percentageTotal += total;
+            }
+
+            examRows += `
+                <tr>
+                    <td>${escapeHTML(exam.name)}</td>
+                    <td>${exam.date || "N/A"}</td>
+                    <td>${total}/100</td>
+                    <td>${percentage.toFixed(1)}%</td>
+                    <td>
+                        <span class="${grade === "F" ? "grade-fail" : "grade-good"}">
+                            <b>${grade}</b>
+                        </span>
+                    </td>
+                    <td class="${pass ? "present" : "absent"}">
+                        ${pass ? "PASS" : "FAIL"}
+                    </td>
+                </tr>
+            `;
+        });
+
+    let totalFees = fees
+        .filter(f => f.studentId === id)
+        .reduce((sum, f) => sum + Number(f.amount || 0), 0);
+
+    let averagePercentage = exams.length === 0 ? 0 : percentageTotal / exams.length;
+
+    /* DISPLAY */
+    content.innerHTML = `
+        <div class="panel">
+            <div class="student-profile">
+                ${studentPhotoHTML(student, "student-photo-large")}
+                <div>
+                    <h3>${escapeHTML(student.name)}</h3>
+                    <p class="small">
+                        Class ${escapeHTML(student.className)} | Group ${escapeHTML(student.group)} | Roll ${escapeHTML(student.roll)}
+                    </p>
+                    <p class="small">
+                        Parent: ${escapeHTML(student.parent || "Not provided")}<br>
+                        Phone: ${escapeHTML(student.phone || "Not provided")}<br>
+                        Joined: ${escapeHTML(student.joined || "Not available")}
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- QUICK SUMMARY -->
+        <div class="history-summary-grid">
+            <div class="history-summary-card">
+                <div class="history-summary-icon">📅</div>
+                <div>
+                    <span>Attendance</span>
+                    <strong>${attendancePercent.toFixed(1)}%</strong>
+                </div>
+            </div>
+
+            <div class="history-summary-card">
+                <div class="history-summary-icon">💰</div>
+                <div>
+                    <span>Total Fees</span>
+                    <strong>Rs. ${totalFees}</strong>
+                </div>
+            </div>
+
+            <div class="history-summary-card">
+                <div class="history-summary-icon">📝</div>
+                <div>
+                    <span>Exams Graded</span>
+                    <strong>${examsTaken}/${exams.length}</strong>
+                </div>
+            </div>
+
+            <div class="history-summary-card">
+                <div class="history-summary-icon">📊</div>
+                <div>
+                    <span>Average</span>
+                    <strong>${averagePercentage.toFixed(1)}%</strong>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h3>📅 Attendance Summary</h3>
+            <p>Present: <b class="present">${present}</b></p>
+            <p>Absent: <b class="absent">${absent}</b></p>
+            <p>Total Recorded: <b>${totalAttendance}</b></p>
+            <p>Attendance: <b>${attendancePercent.toFixed(1)}%</b></p>
+            <br>
+            <table>
+                <thead>
+                    <tr><th>Date</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                    ${attendanceRows || `<tr><td colspan="2" class="empty">No attendance recorded.</td></tr>`}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="panel">
+            <h3>💰 Fee History</h3>
+            <table>
+                <thead>
+                    <tr><th>Month</th><th>Amount</th><th>Status</th><th>Paid Date</th></tr>
+                </thead>
+                <tbody>
+                    ${feeRows || `<tr><td colspan="4" class="empty">No fee records.</td></tr>`}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="panel">
+            <h3>📝 Exam History</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Exam</th>
+                        <th>Date</th>
+                        <th>Total</th>
+                        <th>Percentage</th>
+                        <th>Grade</th>
+                        <th>Result</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${examRows || `<tr><td colspan="6" class="empty">No exams found.</td></tr>`}
+                </tbody>
+            </table>
+        </div>
+    `;
 }
 
 
@@ -5587,263 +5029,113 @@ No exam results.
 ===================================================== */
 function renderDashboard(){
 
-    document.getElementById(
-        "totalStudents"
-    ).innerText =
-        students.length;
+    /* Display Today's Date */
+    let dateElement = document.getElementById("dashboardDate");
+    if (dateElement) {
+        let options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
+        dateElement.innerText = new Date().toLocaleDateString(undefined, options);
+    }
 
+    document.getElementById("totalStudents").innerText = students.length;
 
-    /*
-       Dynamic group cards
-    */
+    /* Dynamic group cards */
+    let groupACount = students.filter(s => s.group === "A").length;
+    let groupBCount = students.filter(s => s.group === "B").length;
+    let groupCCount = students.filter(s => s.group === "C").length;
 
-    let groupACount =
-        students.filter(
-            s => s.group === "A"
-        ).length;
+    document.getElementById("groupA").innerText = groupACount;
+    document.getElementById("groupB").innerText = groupBCount;
+    document.getElementById("groupC").innerText = groupCCount;
 
-    let groupBCount =
-        students.filter(
-            s => s.group === "B"
-        ).length;
-
-    let groupCCount =
-        students.filter(
-            s => s.group === "C"
-        ).length;
-
-
-    /*
-       Keep original A/B/C
-    */
-
-    document.getElementById(
-        "groupA"
-    ).innerText =
-        groupACount;
-
-    document.getElementById(
-        "groupB"
-    ).innerText =
-        groupBCount;
-
-    document.getElementById(
-        "groupC"
-    ).innerText =
-        groupCCount;
-
-
-    /*
-       Today's attendance
-    */
-
+    /* Today's attendance */
     let date = today();
+    let todayData = attendance[date] || {};
 
-    let todayData =
-        attendance[date] || {};
+    let present = Object.values(todayData).filter(v => v === "present").length;
+    let absent = Object.values(todayData).filter(v => v === "absent").length;
 
+    document.getElementById("presentToday").innerText = present;
+    document.getElementById("absentToday").innerText = absent;
 
-    let present =
-        Object.values(todayData)
-        .filter(
-            v => v === "present"
-        )
-        .length;
+    /* Total fees */
+    let totalFees = fees.reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
+    document.getElementById("dashboardTotalFees").innerText = "Rs. " + totalFees;
 
+    /* Total exams */
+    document.getElementById("dashboardTotalExams").innerText = exams.length;
 
-    let absent =
-        Object.values(todayData)
-        .filter(
-            v => v === "absent"
-        )
-        .length;
-
-
-    document.getElementById(
-        "presentToday"
-    ).innerText =
-        present;
-
-
-    document.getElementById(
-        "absentToday"
-    ).innerText =
-        absent;
-
-
-    /*
-       Total fees
-    */
-
-    let totalFees =
-        fees.reduce(
-            (sum, fee) =>
-                sum + Number(fee.amount || 0),
-            0
-        );
-
-
-    document.getElementById(
-        "dashboardTotalFees"
-    ).innerText =
-        "Rs. " + totalFees;
-
-
-    /*
-       Total exams
-    */
-
-    document.getElementById(
-        "dashboardTotalExams"
-    ).innerText =
-        exams.length;
-
-
-    /*
-       Overall attendance
-    */
-
+    /* Overall attendance */
     let overallPresent = 0;
     let overallAbsent = 0;
 
-
-    Object.values(attendance)
-    .forEach(day => {
-
-        Object.values(day)
-        .forEach(status => {
-
-            if(status === "present")
-                overallPresent++;
-
-            if(status === "absent")
-                overallAbsent++;
-
+    Object.values(attendance).forEach(day => {
+        Object.values(day).forEach(status => {
+            if(status === "present") overallPresent++;
+            if(status === "absent") overallAbsent++;
         });
-
     });
 
+    let totalAttendance = overallPresent + overallAbsent;
+    let overallPercentage = totalAttendance === 0 ? 0 : (overallPresent / totalAttendance) * 100;
 
-    let totalAttendance =
-        overallPresent +
-        overallAbsent;
+    document.getElementById("dashboardAttendance").innerText = overallPercentage.toFixed(1) + "%";
 
+    /* Students with records */
+    let studentsWithRecords = new Set();
 
-    let overallPercentage =
-        totalAttendance === 0
-        ? 0
-        : (
-            overallPresent /
-            totalAttendance
-        ) * 100;
-
-
-    document.getElementById(
-        "dashboardAttendance"
-    ).innerText =
-        overallPercentage.toFixed(1) + "%";
-
-
-    /*
-       Students with records
-    */
-
-    let studentsWithRecords =
-        new Set();
-
-
-    Object.values(attendance)
-    .forEach(day => {
-
-        Object.keys(day)
-        .forEach(studentId => {
-
-            studentsWithRecords.add(
-                Number(studentId)
-            );
-
+    Object.values(attendance).forEach(day => {
+        Object.keys(day).forEach(studentId => {
+            studentsWithRecords.add(Number(studentId));
         });
-
     });
-
 
     fees.forEach(fee => {
-
-        studentsWithRecords.add(
-            Number(fee.studentId)
-        );
-
+        studentsWithRecords.add(Number(fee.studentId));
     });
 
-
-    Object.values(results)
-    .forEach(examResults => {
-
-        Object.keys(examResults)
-        .forEach(studentId => {
-
-            studentsWithRecords.add(
-                Number(studentId)
-            );
-
+    Object.values(results).forEach(examResults => {
+        Object.keys(examResults).forEach(studentId => {
+            studentsWithRecords.add(Number(studentId));
         });
-
     });
 
+    document.getElementById("dashboardStudentsWithRecords").innerText = studentsWithRecords.size;
 
-    document.getElementById(
-        "dashboardStudentsWithRecords"
-    ).innerText =
-        studentsWithRecords.size;
+    /* Recent students (Compact Grid Layout) */
+    let container = document.getElementById("dashboardStudents");
+    if (!container) return;
 
+    let recentStudents = students.slice(-10).reverse();
 
-    /*
-       Recent students
-    */
+    if (recentStudents.length === 0) {
+        container.innerHTML = `<div class="empty">No recent students added yet.</div>`;
+        return;
+    }
 
-    let table =
-        document.getElementById(
-            "dashboardStudents"
-        );
+    let html = `<div class="recent-students-grid">`;
 
-
-    table.innerHTML = "";
-
-
-    students
-    .slice(-10)
-    .reverse()
-    .forEach(s=>{
-
-        table.innerHTML += `
-
-<tr>
-
-<td>
-
-${studentPhotoHTML(
-    s,
-    "dashboard-photo"
-)}
-
-<b>${escapeHTML(s.name)}</b>
-
-</td>
-
-<td>${escapeHTML(s.className)}</td>
-
-<td>${escapeHTML(s.group)}</td>
-
-<td>${escapeHTML(s.roll)}</td>
-
-</tr>
-
-`;
-
+    recentStudents.forEach(s => {
+        html += `
+            <div class="recent-student-card">
+                ${studentPhotoHTML(s, "recent-student-avatar")}
+                <div class="recent-student-info">
+                    <strong>${escapeHTML(s.name)}</strong>
+                    <div class="recent-student-meta">
+                        <span>Class ${escapeHTML(s.className)}</span>
+                        <span>Roll ${escapeHTML(s.roll)}</span>
+                        <span>Group ${escapeHTML(s.group)}</span>
+                    </div>
+                    <div class="recent-student-contact">
+                        👨‍👩‍👦 ${escapeHTML(s.parent || "N/A")} | 📞 ${escapeHTML(s.phone || "N/A")}
+                    </div>
+                </div>
+            </div>
+        `;
     });
 
+    html += `</div>`;
+    container.innerHTML = html;
 }
-
 
 /* =====================================================
    BACKUP
@@ -6966,42 +6258,191 @@ async function loadAllAppData() {
 
     if (navigator.onLine) {
         try {
+            // Process any pending sync items first
+            await processSyncQueue();
+
+            // Load fresh data from Supabase
             await loadGroupsFromSupabase();
             await loadStudentsFromSupabase();
             await loadAttendanceFromSupabase();
             await loadFeesFromSupabase();
             await loadExamsFromSupabase();
             await loadResultsFromSupabase();
+
+            // Cache all online data into IndexedDB for offline use
+            await cacheAllDataToOfflineDB();
+
+            renderAll();
+            return;
         } catch (err) {
-            console.warn("Cloud load failed, loading from offline database...", err);
-            await loadGroupsFromOfflineDB();
-            await loadStudentsFromOfflineDB();
+            console.warn("Cloud load failed, falling back to offline database...", err);
         }
-    } else {
-        await loadGroupsFromOfflineDB();
-        await loadStudentsFromOfflineDB();
     }
+
+    // Always fallback to loading ALL tables from IndexedDB when offline
+    await loadGroupsFromOfflineDB();
+    await loadStudentsFromOfflineDB();
+    await loadAttendanceFromOfflineDB();
+    await loadFeesFromOfflineDB();
+    await loadExamsFromOfflineDB();
+    await loadResultsFromOfflineDB();
+
+    renderAll();
 }
 
-window.addEventListener("DOMContentLoaded", async () => {
-    try {
-        // 1. Initialize IndexedDB first
-        await openOfflineDatabase();
-        console.log("IndexedDB Initialized!");
+// Safe helper to cache all in-memory data into IndexedDB when online
+async function cacheAllDataToOfflineDB() {
+    if (!offlineDB) return;
 
-        // 2. Check login status
-        const isLoggedIn = localStorage.getItem("adminLoggedIn") === "true";
-        const loginScreen = document.getElementById("loginScreen");
+    // Helper wrapper to safely write to a specific store without crashing the app
+    const safeCacheStore = (storeName, dataItems) => {
+        try {
+            const tx = offlineDB.transaction(storeName, "readwrite");
+            const store = tx.objectStore(storeName);
+            store.clear();
 
-        if (isLoggedIn) {
-            if (loginScreen) loginScreen.style.display = "none";
-            await loadAllAppData();
-        } else {
-            if (loginScreen) loginScreen.style.display = "flex";
+            if (Array.isArray(dataItems)) {
+                dataItems.forEach(item => {
+                    if (item && item.id !== undefined && item.id !== null) {
+                        store.put(item);
+                    }
+                });
+            }
+        } catch (err) {
+            console.warn(`IndexedDB cache warning for store '${storeName}':`, err);
         }
-    } catch (err) {
-        console.error("Could not initialize offline database:", err);
+    };
+
+    // 1. Cache Groups (convert group name strings back to { id, name } objects)
+    const formattedGroups = (groups || []).map(gName => {
+        const id = groupIds[gName] || Date.now();
+        return { id: id, name: gName };
+    });
+    safeCacheStore("groups", formattedGroups);
+
+    // 2. Cache Students
+    safeCacheStore("students", students || []);
+
+    // 3. Cache Attendance
+    const attendanceArray = [];
+    if (attendance) {
+        Object.keys(attendance).forEach(date => {
+            if (attendance[date]) {
+                Object.keys(attendance[date]).forEach(studentId => {
+                    attendanceArray.push({
+                        id: `${studentId}_${date}`,
+                        student_id: Number(studentId) || studentId,
+                        date: date,
+                        status: attendance[date][studentId]
+                    });
+                });
+            }
+        });
     }
-});
+    safeCacheStore("attendance", attendanceArray);
 
+    // 4. Cache Fees
+    safeCacheStore("fees", fees || []);
 
+    // 5. Cache Exams
+    safeCacheStore("exams", exams || []);
+
+    // 6. Cache Results
+    const resultsArray = [];
+    if (results) {
+        Object.keys(results).forEach(examId => {
+            if (results[examId]) {
+                Object.keys(results[examId]).forEach(studentId => {
+                    const r = results[examId][studentId];
+                    resultsArray.push({
+                        id: `${examId}_${studentId}`,
+                        exam_id: Number(examId) || examId,
+                        student_id: Number(studentId) || studentId,
+                        english: r.english || 0,
+                        nepali: r.nepali || 0,
+                        math: r.math || 0,
+                        science: r.science || 0
+                    });
+                });
+            }
+        });
+    }
+    safeCacheStore("results", resultsArray);
+}
+
+/* =====================================================
+   ATTENDANCE QUICK LOOKUP MODAL LOGIC
+===================================================== */
+
+function openAttendanceSearchModal() {
+    let modal = document.getElementById("attendanceSearchModal");
+    let modalDate = document.getElementById("modalSearchDate");
+    let mainDate = document.getElementById("attendanceDate");
+
+    // Default modal date to the currently selected attendance date or today
+    if (modalDate) {
+        modalDate.value = (mainDate && mainDate.value) ? mainDate.value : today();
+    }
+
+    if (modal) {
+        modal.style.display = "flex";
+        document.getElementById("modalSearchStudentInput").focus();
+    }
+
+    performAttendanceLookup();
+}
+
+function closeAttendanceSearchModal() {
+    let modal = document.getElementById("attendanceSearchModal");
+    if (modal) modal.style.display = "none";
+}
+
+function performAttendanceLookup() {
+    let searchDate = document.getElementById("modalSearchDate")?.value;
+    let query = document.getElementById("modalSearchStudentInput")?.value.trim().toLowerCase();
+    let resultContainer = document.getElementById("attendanceSearchResult");
+
+    if (!resultContainer) return;
+
+    if (!searchDate) {
+        resultContainer.innerHTML = `<p class="text-muted">Please select a date first.</p>`;
+        return;
+    }
+
+    let dayData = attendance[searchDate] || {};
+
+    // Filter students by query name or roll number
+    let filteredStudents = students.filter(s => {
+        let nameMatch = s.name.toLowerCase().includes(query);
+        let rollMatch = String(s.roll || "").toLowerCase().includes(query);
+        return query === "" || nameMatch || rollMatch;
+    });
+
+    if (filteredStudents.length === 0) {
+        resultContainer.innerHTML = `<div class="lookup-empty">No student found matching "<b>${escapeHTML(query)}</b>"</div>`;
+        return;
+    }
+
+    let html = `<div class="lookup-results-list">`;
+
+    filteredStudents.forEach(s => {
+        let status = dayData[s.id]; // "present", "absent", or undefined
+        let badgeClass = status === "present" ? "badge-present" : (status === "absent" ? "badge-absent" : "badge-unmarked");
+        let statusLabel = status === "present" ? "✅ Present" : (status === "absent" ? "❌ Absent" : "⚠️ Not Marked");
+
+        html += `
+            <div class="lookup-card">
+                <div class="lookup-student-details">
+                    <strong>${escapeHTML(s.name)}</strong>
+                    <div class="lookup-meta">Class: ${escapeHTML(s.className)} | Roll: ${escapeHTML(s.roll)} | Group: ${escapeHTML(s.group)}</div>
+                </div>
+                <div class="lookup-status-badge ${badgeClass}">
+                    ${statusLabel}
+                </div>
+            </div>
+        `;
+    });
+
+    html += `</div>`;
+    resultContainer.innerHTML = html;
+}
