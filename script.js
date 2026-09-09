@@ -8,12 +8,6 @@ let selectedHistoryStudentId = null;
 // ==========================================
 
 // Groups
-function saveGroupsToOfflineDB(groups) {
-    try {
-        localStorage.setItem('rtc_offline_groups', JSON.stringify(groups || window.groups || []));
-        console.log("Groups cached locally.");
-    } catch (e) { console.error("Error saving groups:", e); }
-}
 
 function getGroupsFromOfflineDB() {
     try {
