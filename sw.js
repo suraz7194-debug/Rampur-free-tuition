@@ -1,8 +1,10 @@
-const CACHE_NAME = "rampur-free-tuition-v7";
+const CACHE_NAME = "rampur-free-tuition-v8";
 
 const FILES_TO_CACHE = [
     "./",
     "./index.html",
+    "./style.css",
+    "./script.js",
     "./manifest.json"
 ];
 
