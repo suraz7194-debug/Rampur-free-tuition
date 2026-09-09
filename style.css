@@ -3502,3 +3502,269 @@ body{
     }
 
 }
+/* =====================================================
+   COMPACT RECENT STUDENTS DASHBOARD CARD
+===================================================== */
+
+/* Container for recent students list/grid */
+.recent-students-grid, 
+#recentStudentsList {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+    width: 100%;
+}
+
+/* Individual Student Card */
+.recent-student-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+/* Student Avatar / Photo */
+.recent-student-card img,
+.recent-student-avatar {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+/* Info Column - Stacked tightly */
+.recent-student-info {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    min-width: 0; /* Prevents text overflow breaking layout */
+    width: 100%;
+}
+
+/* Student Name */
+.recent-student-info h4,
+.recent-student-info strong {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #1e293b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Metadata badges/pills in a tight single inline row */
+.recent-student-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78rem;
+    color: #64748b;
+}
+
+.recent-student-meta span {
+    background: #f1f5f9;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+/* Contact info (Parent / Phone) */
+.recent-student-contact {
+    font-size: 0.75rem;
+    color: #64748b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+/* Disable horizontal scrolling on recent students container */
+#dashboardStudents,
+#dashboardStudents .recent-students-grid {
+    overflow-x: hidden !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+/* Ensure cards wrap vertically if screen is small instead of stretching sideways */
+.recent-students-grid {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 10px !important;
+    width: 100% !important;
+}
+
+.recent-student-card {
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+/* Disable horizontal scrolling on recent students section */
+.recent-cards-wrapper,
+.dashboard-recent {
+    overflow-x: hidden !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+#dashboardStudents {
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+/* =====================================================
+   ATTENDANCE QUICK LOOKUP MODAL STYLING
+===================================================== */
+
+.attendance-top-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.btn-search-attendance {
+    background: #0284c7;
+    color: #ffffff;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.9rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.btn-search-attendance:hover {
+    background: #0369a1;
+}
+
+/* Modal Overlay */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(15, 23, 42, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 16px;
+    box-sizing: border-box;
+}
+
+.attendance-modal {
+    background: #ffffff;
+    width: 100%;
+    max-width: 500px;
+    border-radius: 12px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+    overflow: hidden;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 18px;
+    background: #f8fafc;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    color: #0f172a;
+}
+
+.close-modal-btn {
+    background: transparent;
+    border: none;
+    font-size: 1.2rem;
+    cursor: pointer;
+    color: #64748b;
+}
+
+.modal-body {
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.search-field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.search-field-group input {
+    padding: 8px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 0.9rem;
+}
+
+.search-result-box {
+    max-height: 250px;
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+    background: #f8fafc;
+}
+
+.lookup-results-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.lookup-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+}
+
+.lookup-meta {
+    font-size: 0.78rem;
+    color: #64748b;
+    margin-top: 2px;
+}
+
+.lookup-status-badge {
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.badge-present {
+    background: #dcfce7;
+    color: #15803d;
+}
+
+.badge-absent {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.badge-unmarked {
+    background: #f1f5f9;
+    color: #64748b;
+    }
