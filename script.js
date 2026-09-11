@@ -1,54 +1,6 @@
 let selectedStudentPhoto = "";
 let selectedEditPhoto = "";
-
-// Fix for renderStudentHistory ReferenceError:
 let selectedHistoryStudentId = null;
-// ==========================================
-// OFFLINE DATABASE HELPERS (STEP 2)
-// ==========================================
-
-// Groups
-
-function getGroupsFromOfflineDB() {
-    try {
-        const data = localStorage.getItem('rtc_offline_groups');
-        return data ? JSON.parse(data) : [];
-    } catch (e) { return []; }
-}
-
-// Students
-function saveStudentsToOfflineDB(students) {
-    try {
-        localStorage.setItem('rtc_offline_students', JSON.stringify(students || window.students || []));
-    } catch (e) { console.error("Error saving students:", e); }
-}
-
-function getStudentsFromOfflineDB() {
-    try {
-        const data = localStorage.getItem('rtc_offline_students');
-        return data ? JSON.parse(data) : [];
-    } catch (e) { return []; }
-}
-
-// Attendance, Fees & Exams Fallbacks
-function saveAttendanceToOfflineDB(data) {
-    try { localStorage.setItem('rtc_offline_attendance', JSON.stringify(data || [])); } catch (e) {}
-}
-
-function saveFeesToOfflineDB(data) {
-    try { localStorage.setItem('rtc_offline_fees', JSON.stringify(data || [])); } catch (e) {}
-}
-
-function saveExamsToOfflineDB(data) {
-    try { localStorage.setItem('rtc_offline_exams', JSON.stringify(data || [])); } catch (e) {}
-}
-
-// Universal initialization helper (prevents "Could not initialize offline database")
-function initOfflineDB() {
-    console.log("Offline database initialized successfully.");
-    return true;
-}
-
 
 /* =====================================================
    SUPABASE
@@ -65,6 +17,16 @@ const supabaseClient = supabase.createClient(
 
 /* =====================================================
    ADMIN LOGIN & SESSION (OFFLINE READY)
+
+   Online: Supabase auth is the source of truth.
+   Offline: passwords are never checked offline (there is
+   nothing safe to check them against, and a password should
+   not sit in the client bundle). Instead, once a device has
+   logged in successfully online at least once, that fact -
+   not the password - is remembered, so the same device can
+   keep working offline afterwards. A brand-new device that
+   has never been online cannot log in for the first time
+   without connecting once.
 ===================================================== */
 
 async function adminLogin() {
@@ -82,47 +44,59 @@ async function adminLogin() {
 
     if (message) message.innerText = "Logging in...";
 
-    // 1. Try Supabase Login if online
-    if (navigator.onLine && typeof supabaseClient !== "undefined") {
+    if (navigator.onLine) {
         try {
-            const { data, error } = await supabaseClient.auth.signInWithPassword({
-                email: email,
-                password: password
-            });
-
+            const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
             if (error) throw error;
 
-            // Save login state locally so offline access works later
             localStorage.setItem("adminLoggedIn", "true");
+            if (message) message.innerText = "";
             document.getElementById("loginScreen").style.display = "none";
-            await loadAllAppData();
+            await initApp();
             return;
         } catch (err) {
-            console.warn("Supabase auth failed or offline, trying offline check...", err.message);
+            console.warn("Supabase login failed:", err.message);
+            if (message) message.innerText = "Invalid email or password.";
+            return;
         }
     }
 
-    // 2. Offline Fallback Check (Allows login without internet)
-    if (email === "admin@tuition.com" && password === "123456") {
-        localStorage.setItem("adminLoggedIn", "true");
+    // Offline: only allow re-entry if this device has logged in successfully before.
+    if (localStorage.getItem("adminLoggedIn") === "true") {
+        if (message) message.innerText = "";
         document.getElementById("loginScreen").style.display = "none";
-        await loadAllAppData();
+        await initApp();
     } else {
-        if (message) message.innerText = "Invalid credentials or network unavailable.";
+        if (message) message.innerText = "No internet connection. Please connect once to log in for the first time.";
     }
 }
 
 function adminLogout() {
     localStorage.removeItem("adminLoggedIn");
-    if (navigator.onLine && typeof supabaseClient !== "undefined" && supabaseClient.auth) {
+    if (navigator.onLine && supabaseClient.auth) {
         supabaseClient.auth.signOut();
     }
+
+    // Clear the stale "Logging in..." / error text and the password field
+    // so the login screen comes back clean instead of showing leftover
+    // state from the previous session.
+    const message = document.getElementById("loginMessage");
+    if (message) message.innerText = "";
+
+    const passwordInput = document.getElementById("loginPassword");
+    if (passwordInput) passwordInput.value = "";
+
     const loginScreen = document.getElementById("loginScreen");
     if (loginScreen) loginScreen.style.display = "flex";
 }
 
 /* =====================================================
    CHECK ADMIN SESSION
+
+   Runs immediately on script load. Always loads app data
+   after confirming the session - this fixes the old bug
+   where a returning (already logged-in) teacher saw a blank
+   app because nothing ever loaded their data.
 ===================================================== */
 
 async function checkAdminSession() {
@@ -131,16 +105,18 @@ async function checkAdminSession() {
     if (isLoggedInLocally) {
         const loginScreen = document.getElementById("loginScreen");
         if (loginScreen) loginScreen.style.display = "none";
+        await initApp();
         return;
     }
 
-    if (navigator.onLine && typeof supabaseClient !== "undefined") {
+    if (navigator.onLine) {
         try {
             const { data: { session } } = await supabaseClient.auth.getSession();
             if (session) {
                 localStorage.setItem("adminLoggedIn", "true");
                 const loginScreen = document.getElementById("loginScreen");
                 if (loginScreen) loginScreen.style.display = "none";
+                await initApp();
             }
         } catch (err) {
             console.warn("Could not check online session:", err);
@@ -151,38 +127,27 @@ async function checkAdminSession() {
 checkAdminSession();
 
 
-
-
 /* =====================================================
-   DATA
+   APP DATA (in-memory - mirrors what is in IndexedDB)
 ===================================================== */
 
 let students = [];
+let fees = [];
+let exams = [];
+let results = {};        // { examId: { studentId: {id, english, nepali, math, science, total} } }
+let groups = [];
+let groupIds = {};       // name -> id
+let attendance = {};     // { date: { studentId: status } }
+let attendanceIds = {};  // { "date|studentId": id } - lets us upsert instead of duplicate-insert
 
-async function loadStudentsFromSupabase() {
-    const { data, error } = await supabaseClient
-        .from("students")
-        .select("*")
-        .order("id", { ascending: true });
+let studentGroup = "A";
+let attendanceGroup = "A";
+let resultGroup = "A";
 
-    if (error) {
+/* ---------- row (Supabase/IndexedDB shape) <-> app shape ---------- */
 
-    console.error(
-        "SUPABASE LOAD ERROR:",
-        error
-    );
-
-    console.log(
-        "Loading students from offline database..."
-    );
-
-    await loadStudentsFromOfflineDB();
-
-    return;
-    }
-  
-
-    students = data.map(row => ({
+function studentFromRow(row) {
+    return {
         id: row.id,
         name: row.name,
         className: row.class,
@@ -191,916 +156,226 @@ async function loadStudentsFromSupabase() {
         phone: row.phone,
         group: row.group,
         joined: row.date_joined,
-        photo: row.photo || ""
-    }));
-
-    renderAll();
-
-await saveStudentsToOfflineDB();
-
+        photo: row.photo || "",
+        createdAt: row.created_at || null
+    };
 }
-async function saveStudentsToOfflineDB(studentsData){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "students",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "students"
-            );
-
-        students.forEach(student => {
-
-            store.put(student);
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Students saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save students offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
-
-}
-async function loadStudentsFromOfflineDB(){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "students",
-                "readonly"
-            );
-
-        const store =
-            transaction.objectStore(
-                "students"
-            );
-
-        const request =
-            store.getAll();
-
-        request.onsuccess = function(){
-
-            students =
-                request.result || [];
-
-            console.log(
-                "Students loaded from offline database."
-            );
-
-            renderAll();
-
-            resolve();
-
-        };
-
-        request.onerror = function(){
-
-            console.error(
-                "Could not load students offline:",
-                request.error
-            );
-
-            reject(
-                request.error
-            );
-
-        };
-
-    });
-
+function studentToRow(s) {
+    const row = {
+        id: s.id,
+        name: s.name,
+        class: s.className,
+        roll: s.roll,
+        parent: s.parent,
+        phone: s.phone,
+        group: s.group,
+        date_joined: s.joined,
+        photo: s.photo || ""
+    };
+    if (s.createdAt) row.created_at = s.createdAt;
+    return row;
 }
 
-let attendance = {};
+function feeFromRow(row) {
+    return { id: row.id, studentId: row.student_id, month: row.month, amount: Number(row.amount), paidDate: row.date };
+}
+function feeToRow(f) {
+    return { id: f.id, student_id: f.studentId, month: f.month, amount: Number(f.amount), date: f.paidDate };
+}
 
-async function loadAttendanceFromSupabase(){
+function examFromRow(row) {
+    return { id: row.id, name: row.exam_name, date: row.date, createdAt: row.created_at || null };
+}
+function examToRow(e) {
+    const row = { id: e.id, exam_name: e.name, date: e.date };
+    if (e.createdAt) row.created_at = e.createdAt;
+    return row;
+}
 
-    const { data, error } =
-        await supabaseClient
-        .from("attendance")
-        .select("*")
-        .order("date", { ascending: true });
+/* ---------- building the display caches from raw arrays ---------- */
 
-
-    if(error){
-
-        console.error(
-            "SUPABASE ATTENDANCE LOAD ERROR:",
-            error
-        );
-
-        alert(
-            "Could not load attendance from Supabase."
-        );
-
-        return;
-
-    }
-
-
+function rebuildAttendanceCache(rows) {
     attendance = {};
-
-
-    data.forEach(row => {
-
-        if(!attendance[row.date]){
-
-            attendance[row.date] = {};
-
-        }
-
-
-        attendance[row.date][row.student_id] =
-            row.status;
-
-    });
-
-
-    renderAttendance();
-renderMonthlyAttendance();
-renderDashboard();
-
-await saveAttendanceToOfflineDB();
-
-}
-async function saveAttendanceToOfflineDB(attendanceData){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "attendance",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "attendance"
-            );
-
-        Object.keys(attendance).forEach(date => {
-
-            Object.keys(attendance[date]).forEach(studentId => {
-
-                store.put({
-
-                    id:
-                        date + "_" + studentId,
-
-                    date:
-                        date,
-
-                    student_id:
-                        Number(studentId),
-
-                    status:
-                        attendance[date][studentId]
-
-                });
-
-            });
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Attendance saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save attendance offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
-
-}
-
-let fees = [];
-
-async function loadFeesFromSupabase(){
-
-    const { data, error } =
-        await supabaseClient
-        .from("fees")
-        .select("*")
-        .order("date", { ascending: true });
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE FEES LOAD ERROR:",
-            error
-        );
-
-        alert(
-            "Could not load fees from Supabase."
-        );
-
-        return;
-
-    }
-
-
-    fees = data.map(row => ({
-
-        id: row.id,
-
-        studentId: row.student_id,
-
-        month: row.month,
-
-        amount: Number(row.amount),
-
-        paidDate: row.date
-
-    }));
-
-
-    renderFees();
-  
-await saveFeesToOfflineDB();
-
-}
-async function saveFeesToOfflineDB(feesData){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "fees",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "fees"
-            );
-
-        fees.forEach(fee => {
-
-            store.put({
-
-                id:
-                    fee.id,
-
-                student_id:
-                    fee.studentId,
-
-                month:
-                    fee.month,
-
-                amount:
-                    Number(fee.amount),
-
-                date:
-                    fee.paidDate
-
-            });
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Fees saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save fees offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
-
-}
-
-let exams = [];
-
-async function loadExamsFromSupabase(){
-
-    const { data, error } =
-        await supabaseClient
-        .from("exams")
-        .select("*")
-        .order("date", { ascending: true });
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE EXAMS LOAD ERROR:",
-            error
-        );
-
-        alert(
-            "Could not load exams from Supabase."
-        );
-
-        return;
-
-    }
-
-
-    exams = data.map(row => ({
-
-        id: row.id,
-
-        name: row.exam_name,
-
-        date: row.date
-
-    }));
-
-
-    renderExamSelect();
-
-await saveExamsToOfflineDB();
-
-}
-async function saveExamsToOfflineDB(examsData){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "exams",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "exams"
-            );
-
-        exams.forEach(exam => {
-
-            store.put({
-
-                id:
-                    exam.id,
-
-                exam_name:
-                    exam.name,
-
-                date:
-                    exam.date
-
-            });
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Exams saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save exams offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
-
-}
-/* =====================================================
-   MISSING OFFLINE FUNCTIONS
-===================================================== */
-
-async function saveGroupsToOfflineDB() {
-    if (!offlineDB) return;
-
-    return new Promise((resolve, reject) => {
-        const transaction = offlineDB.transaction("groups", "readwrite");
-        const store = transaction.objectStore("groups");
-
-        groups.forEach((groupName) => {
-            store.put({
-                id: groupIds[groupName] || groupName,
-                name: groupName
-            });
-        });
-
-        transaction.oncomplete = function () {
-            console.log("Groups saved to offline database.");
-            resolve();
-        };
-
-        transaction.onerror = function () {
-            console.error("Could not save groups offline:", transaction.error);
-            reject(transaction.error);
-        };
+    attendanceIds = {};
+    rows.forEach(row => {
+        if (!attendance[row.date]) attendance[row.date] = {};
+        attendance[row.date][row.student_id] = row.status;
+        attendanceIds[row.date + "|" + row.student_id] = row.id;
     });
 }
 
-async function loadGroupsFromOfflineDB() {
-    if (!offlineDB) return;
-
-    return new Promise((resolve, reject) => {
-        const transaction = offlineDB.transaction("groups", "readonly");
-        const store = transaction.objectStore("groups");
-        const request = store.getAll();
-
-        request.onsuccess = function () {
-            const data = request.result || [];
-            if (data.length > 0) {
-                groups = data.map((item) => item.name);
-                groupIds = {};
-                data.forEach((item) => { groupIds[item.name] = item.id; });
-            } else {
-                groups = ["A"];
-            }
-            console.log("Groups loaded from offline database.");
-            renderAll();
-            resolve();
-        };
-
-        request.onerror = function () {
-            console.error("Could not load groups offline:", request.error);
-            reject(request.error);
-        };
-    });
-}
-
-
-let results = {};
-
-async function loadResultsFromSupabase(){
-
-    const { data, error } =
-        await supabaseClient
-        .from("results")
-        .select("*");
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE RESULTS LOAD ERROR:",
-            error
-        );
-
-        alert(
-            "Could not load results from Supabase."
-        );
-
-        return;
-
-    }
-
-
+function rebuildResultsCache(rows) {
     results = {};
-
-
-    data.forEach(row => {
-
-        if(!results[row.exam_id]){
-
-            results[row.exam_id] = {};
-
-        }
-
-
+    rows.forEach(row => {
+        if (!results[row.exam_id]) results[row.exam_id] = {};
         results[row.exam_id][row.student_id] = {
-
+            id: row.id,
             english: Number(row.english || 0),
-
             nepali: Number(row.nepali || 0),
-
             math: Number(row.maths || 0),
-
             science: Number(row.science || 0),
-
             total: Number(row.total || 0)
-
         };
-
     });
-
-
-    renderResults();
-  await saveResultsToOfflineDB();
-
-}
-async function saveResultsToOfflineDB(){
-
-    if(!offlineDB)
-        return;
-
-    return new Promise((resolve, reject) => {
-
-        const transaction =
-            offlineDB.transaction(
-                "results",
-                "readwrite"
-            );
-
-        const store =
-            transaction.objectStore(
-                "results"
-            );
-
-        Object.keys(results).forEach(examId => {
-
-            Object.keys(results[examId]).forEach(studentId => {
-
-                const result =
-                    results[examId][studentId];
-
-                store.put({
-
-                    id:
-                        String(examId) +
-                        "_" +
-                        String(studentId),
-
-                    exam_id:
-                        Number(examId),
-
-                    student_id:
-                        Number(studentId),
-
-                    english:
-                        Number(result.english || 0),
-
-                    nepali:
-                        Number(result.nepali || 0),
-
-                    maths:
-                        Number(result.math || 0),
-
-                    science:
-                        Number(result.science || 0),
-
-                    total:
-                        Number(result.total || 0)
-
-                });
-
-            });
-
-        });
-
-        transaction.oncomplete = function(){
-
-            console.log(
-                "Results saved to offline database."
-            );
-
-            resolve();
-
-        };
-
-        transaction.onerror = function(){
-
-            console.error(
-                "Could not save results offline:",
-                transaction.error
-            );
-
-            reject(
-                transaction.error
-            );
-
-        };
-
-    });
-
 }
 
-
-/*
-   NEW GROUP SYSTEM
-
-   If old data already exists,
-   Group A, B and C are automatically created.
-*/
-
-let groups = [];
-let groupIds = {};
-
-let studentGroup = "A";
-
-let attendanceGroup = "A";
-
-let resultGroup = "A";
-
-async function loadGroupsFromSupabase(){
-
-    const { data, error } =
-        await supabaseClient
-        .from("groups")
-        .select("*")
-        .order("id", { ascending: true });
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE GROUPS LOAD ERROR:",
-            error
-        );
-
-        alert(
-            "Could not load groups from Supabase:\n" +
-            error.message
-        );
-
-        return;
-
-    }
-
+function rebuildGroupsCache(rows) {
+    let sorted = rows.slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
 
     groupIds = {};
+    groups = sorted.map(row => String(row.name).trim()).filter(Boolean);
+    sorted.forEach(row => { groupIds[String(row.name).trim()] = row.id; });
 
-data.forEach(row => {
-
-    let name =
-        String(row.name).trim();
-
-    if(name){
-        groupIds[name] = row.id;
-    }
-
-});
-
-groups =
-    data
-    .map(row => String(row.name).trim())
-    .filter(Boolean);
-
-
-    if(groups.length === 0){
-
+    if (groups.length === 0) {
         groups = ["A"];
-
     }
 
-
-    studentGroup =
-        groups.includes(studentGroup)
-            ? studentGroup
-            : groups[0];
-
-    attendanceGroup =
-        groups.includes(attendanceGroup)
-            ? attendanceGroup
-            : groups[0];
-
-    resultGroup =
-        groups.includes(resultGroup)
-            ? resultGroup
-            : groups[0];
-
-
-    renderAll();
-
-await saveGroupsToOfflineDB();
-
+    studentGroup = groups.includes(studentGroup) ? studentGroup : groups[0];
+    attendanceGroup = groups.includes(attendanceGroup) ? attendanceGroup : groups[0];
+    resultGroup = groups.includes(resultGroup) ? resultGroup : groups[0];
 }
-function openOfflineDatabase() {
-    return new Promise((resolve, reject) => {
-        // Return existing database connection if already open
-        if (offlineDB) {
-            resolve(offlineDB);
-            return;
-        }
-
-        const request = indexedDB.open(OFFLINE_DB_NAME, OFFLINE_DB_VERSION);
-
-        request.onupgradeneeded = function (event) {
-            const db = event.target.result;
-
-            if (!db.objectStoreNames.contains("students")) {
-                db.createObjectStore("students", { keyPath: "id" });
-            }
-
-            if (!db.objectStoreNames.contains("groups")) {
-                db.createObjectStore("groups", { keyPath: "id" });
-            }
-
-            if (!db.objectStoreNames.contains("attendance")) {
-                db.createObjectStore("attendance", { keyPath: "id" });
-            }
-
-            if (!db.objectStoreNames.contains("fees")) {
-                db.createObjectStore("fees", { keyPath: "id" });
-            }
-
-            if (!db.objectStoreNames.contains("exams")) {
-                db.createObjectStore("exams", { keyPath: "id" });
-            }
-
-            if (!db.objectStoreNames.contains("results")) {
-                db.createObjectStore("results", { keyPath: "id" });
-            }
-
-            if (!db.objectStoreNames.contains("syncQueue")) {
-                db.createObjectStore("syncQueue", { keyPath: "queueId", autoIncrement: true });
-            }
-        };
-
-        request.onsuccess = function (event) {
-            offlineDB = event.target.result;
-
-            // Prevent crash if database connection closes unexpectedly
-            offlineDB.onclose = () => {
-                offlineDB = null;
-            };
-
-            console.log("Offline database ready.");
-            resolve(offlineDB);
-        };
-
-        request.onerror = function () {
-            console.error("Offline database error:", request.error);
-            reject(request.error);
-        };
-    });
-}
-// 1. Add an action to the sync queue
-async function addToSyncQueue(actionType, tableName, payload) {
-    if (!offlineDB) await openOfflineDatabase();
-    
-    return new Promise((resolve, reject) => {
-        const tx = offlineDB.transaction("syncQueue", "readwrite");
-        const store = tx.objectStore("syncQueue");
-        const queueItem = {
-            action: actionType, // 'INSERT', 'UPDATE', or 'DELETE'
-            table: tableName,   // 'students', 'attendance', 'fees', 'groups', etc.
-            data: payload,
-            timestamp: Date.now()
-        };
-        const req = store.add(queueItem);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-    });
-}
-
-// 2. Get all pending items in the queue
-async function getSyncQueue() {
-    if (!offlineDB) await openOfflineDatabase();
-
-    return new Promise((resolve, reject) => {
-        const tx = offlineDB.transaction("syncQueue", "readonly");
-        const store = tx.objectStore("syncQueue");
-        const req = store.getAll();
-        req.onsuccess = () => resolve(req.result || []);
-        req.onerror = () => reject(req.error);
-    });
-}
-
-// 3. Remove an item from the queue after successful sync to Supabase
-async function removeFromSyncQueue(queueId) {
-    if (!offlineDB) await openOfflineDatabase();
-
-    return new Promise((resolve, reject) => {
-        const tx = offlineDB.transaction("syncQueue", "readwrite");
-        const store = tx.objectStore("syncQueue");
-        const req = store.delete(queueId);
-        req.onsuccess = () => resolve();
-        req.onerror = () => reject(req.error);
-    });
-}
-// 4. Process all queued changes and sync with Supabase when online
-async function processSyncQueue() {
-    if (!navigator.onLine) return;
-
-    const queue = await getSyncQueue();
-    if (queue.length === 0) return;
-
-    console.log(`Processing ${queue.length} offline items...`);
-
-    for (const item of queue) {
-        try {
-            let error = null;
-
-            if (item.action === "INSERT" || item.action === "UPDATE") {
-                const { error: upsertErr } = await supabaseClient
-                    .from(item.table)
-                    .upsert(item.data);
-                error = upsertErr;
-            } else if (item.action === "DELETE") {
-                const { error: deleteErr } = await supabaseClient
-                    .from(item.table)
-                    .delete()
-                    .eq("id", item.data.id);
-                error = deleteErr;
-            }
-
-            if (error) {
-                console.error(`Failed to sync item ${item.queueId}:`, error);
-                // Skip deleting from queue so it can retry later
-                continue;
-            }
-
-            // Remove successfully synced item from local queue
-            await removeFromSyncQueue(item.queueId);
-            console.log(`Synced item ${item.queueId} to ${item.table}`);
-
-        } catch (err) {
-            console.error(`Unexpected sync error on item ${item.queueId}:`, err);
-        }
-    }
-
-    // Refresh UI data from Supabase once sync is complete
-    await loadAllAppData();
-}
-
-// Automatically trigger sync when coming back online
-window.addEventListener("online", processSyncQueue);
-
-
-
 
 /* =====================================================
-   SAVE ALL
+   LOAD ALL DATA FROM LOCAL INDEXEDDB
+   Always works, online or offline, and is fast because it
+   never waits on the network.
 ===================================================== */
 
-function saveAll(){
+async function loadAllFromLocal() {
+    const [studentRows, feeRows, examRows, groupRows, attendanceRows, resultRows] = await Promise.all([
+        RFT.getAll("students"),
+        RFT.getAll("fees"),
+        RFT.getAll("exams"),
+        RFT.getAll("groups"),
+        RFT.getAll("attendance"),
+        RFT.getAll("results")
+    ]);
 
-    // Supabase is now the permanent database.
-    // No localStorage backup is needed here.
+    students = studentRows.map(studentFromRow)
+        .sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
 
+    fees = feeRows.map(feeFromRow)
+        .sort((a, b) => String(a.paidDate || "").localeCompare(String(b.paidDate || "")));
+
+    exams = examRows.map(examFromRow)
+        .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+
+    rebuildGroupsCache(groupRows);
+    rebuildAttendanceCache(attendanceRows);
+    rebuildResultsCache(resultRows);
+}
+
+/* =====================================================
+   PULL FRESH DATA FROM SUPABASE INTO INDEXEDDB
+   (download direction of sync - this is how one teacher's
+   device sees another teacher's changes)
+===================================================== */
+
+async function pullAllFromSupabase() {
+    for (const table of RFT.TABLES) {
+        const { data, error } = await supabaseClient.from(table).select("*");
+        if (error) {
+            console.error(`Could not pull ${table} from Supabase:`, error);
+            continue; // keep whatever is already cached locally for this table
+        }
+        await RFT.clearStore(table);
+        await RFT.putMany(table, data || []);
+    }
+}
+
+/* =====================================================
+   OUTBOX HYGIENE
+   Cancels queued upserts for child records that no longer
+   have anywhere to go (their parent student/exam was deleted
+   locally before the child record ever finished syncing).
+===================================================== */
+
+async function purgeOutboxFor(table, predicate) {
+    const pending = await RFT.getPendingOutbox();
+    for (const item of pending) {
+        if (item.table !== table || item.action !== "upsert") continue;
+        if (predicate(item.record || {})) {
+            await RFT.removeFromOutbox(item.localId);
+        }
+    }
+}
+
+/* =====================================================
+   APP INITIALIZATION (single entry point)
+
+   1. Always load from IndexedDB first, so the UI shows data
+      immediately - online or offline.
+   2. If online, sync in the background: push pending outbox
+      changes, then pull fresh shared data, then refresh the
+      screen. Never blocks the initial render on the network.
+===================================================== */
+
+let appEventsBound = false;
+
+async function initApp() {
+    await RFT.openDB();
+    await loadAllFromLocal();
+    renderAll();
+
+    if (!appEventsBound) {
+        appEventsBound = true;
+        window.addEventListener("online", () => { updateConnectionBadge(); syncNow(); });
+        window.addEventListener("offline", updateConnectionBadge);
+    }
+    updateConnectionBadge();
+    updateSyncBadge();
+
+    if (navigator.onLine) {
+        syncNow();
+    }
+}
+
+async function syncNow() {
+    if (!navigator.onLine) return;
+    updateSyncBadge("Syncing...");
+    try {
+        await RFT.processOutbox(supabaseClient);
+        await pullAllFromSupabase();
+        await loadAllFromLocal();
+        renderAll();
+    } catch (err) {
+        console.error("Sync failed:", err);
+    }
+    updateSyncBadge();
+}
+
+async function updateSyncBadge(overrideText) {
+    const el = document.getElementById("syncBadge");
+    if (!el) return;
+    if (overrideText) {
+        el.textContent = overrideText;
+        return;
+    }
+    const pending = await RFT.outboxCount();
+    el.textContent = pending > 0 ? ("⏳ " + pending + " change(s) waiting to sync") : "✅ All changes synced";
+}
+
+function updateConnectionBadge() {
+    const el = document.getElementById("connectionBadge");
+    if (!el) return;
+    el.textContent = navigator.onLine ? "🟢 Online" : "🔴 Offline";
+    el.className = navigator.onLine ? "connection-badge online" : "connection-badge offline";
+}
+
+/* =====================================================
+   NAVIGATION
+===================================================== */
+
+function saveAll() {
+    // Every mutation writes to IndexedDB and the outbox immediately (see
+    // each add/edit/delete function). This just opportunistically pushes
+    // those changes to Supabase right away when online, instead of
+    // waiting for the next scheduled sync.
+    if (navigator.onLine) {
+        syncNow();
+    } else {
+        updateSyncBadge();
+    }
 }
 
 
@@ -1138,9 +413,16 @@ function showSection(id,button){
 
 function today(){
 
+    // Uses the device's own local date (not UTC), so attendance/fees
+    // logged near midnight land on the correct calendar day for
+    // whatever timezone the teacher's phone/computer is actually set to.
     let d = new Date();
 
-    return d.toISOString().split("T")[0];
+    let year = d.getFullYear();
+    let month = String(d.getMonth() + 1).padStart(2, "0");
+    let day = String(d.getDate()).padStart(2, "0");
+
+    return year + "-" + month + "-" + day;
 
 }
 
@@ -1380,14 +662,14 @@ function renderManageGroups(){
                 <div class="group-menu-dropdown">
 
                     <button
-                        onclick="editGroup(${groupId})">
+                        onclick="editGroup('${groupId}')">
                         ✏️
                         <span>Edit Group</span>
                     </button>
 
                     <button
                         class="delete-option"
-                        onclick="deleteGroup(${groupId})">
+                        onclick="deleteGroup('${groupId}')">
                         🗑️
                         <span>Delete Group</span>
                     </button>
@@ -1468,7 +750,6 @@ async function addGroup() {
         return;
     }
 
-    /* Check duplicate */
     let exists = groups.some(
         g => g.toLowerCase() === name.toLowerCase()
     );
@@ -1478,49 +759,26 @@ async function addGroup() {
         return;
     }
 
-    let groupObj = null;
+    const id = RFT.newId();
+    const row = { id, name, created_at: new Date().toISOString() };
 
-    // 1. Try Online Insert or Fallback to Offline Queue
-    if (navigator.onLine) {
-        try {
-            const { data, error } = await supabaseClient
-                .from("groups")
-                .insert({ name: name })
-                .select()
-                .single();
+    // 1. Local-first: write to IndexedDB + in-memory immediately - works offline.
+    await RFT.put("groups", row);
+    await RFT.enqueue("groups", "upsert", row);
 
-            if (error) throw error;
+    groups.push(name);
+    groupIds[name] = id;
 
-            groupObj = { id: data.id, name: data.name };
-        } catch (err) {
-            console.warn("Online group add failed, queueing offline action...", err);
-        }
-    }
-
-    if (!groupObj) {
-        const tempId = Date.now(); // Local temporary ID
-        const payload = { id: tempId, name: name };
-
-        await addToSyncQueue("INSERT", "groups", payload);
-        groupObj = payload;
-    }
-
-    /* =========================
-       UPDATE LOCAL STATE
-    ========================= */
-    groups.push(groupObj.name);
-    groupIds[groupObj.name] = groupObj.id;
-
-    studentGroup = groupObj.name;
-    attendanceGroup = groupObj.name;
-    resultGroup = groupObj.name;
+    studentGroup = name;
+    attendanceGroup = name;
+    resultGroup = name;
 
     input.value = "";
 
     saveAll();
     renderAll();
 
-    alert("Group '" + groupObj.name + "' added successfully.");
+    alert("Group '" + name + "' added successfully.");
 }
 
 /* =========================
@@ -1545,7 +803,6 @@ async function editGroup(groupId) {
         return;
     }
 
-    /* Check duplicate */
     let duplicate = groups.some(
         g => g !== oldName && g.toLowerCase() === newName.toLowerCase()
     );
@@ -1555,27 +812,20 @@ async function editGroup(groupId) {
         return;
     }
 
-    // 1. Online Sync or Offline Queueing
-    if (navigator.onLine) {
-        try {
-            await supabaseClient.from("students").update({ group: newName }).eq("group", oldName);
-            await supabaseClient.from("groups").update({ name: newName }).eq("id", groupId);
-        } catch (err) {
-            console.warn("Online group update failed, queueing offline action...", err);
-            await addToSyncQueue("UPDATE", "groups", { id: groupId, name: newName });
-        }
-    } else {
-        await addToSyncQueue("UPDATE", "groups", { id: groupId, name: newName });
-    }
+    const groupRow = { id: groupId, name: newName };
+    await RFT.put("groups", groupRow);
+    await RFT.enqueue("groups", "upsert", groupRow);
 
-    /* =========================
-       UPDATE LOCAL STUDENTS & GROUPS
-    ========================= */
-    students.forEach(student => {
+    // students.group is a plain text column, not a foreign key, so every
+    // affected student's own row needs its own update.
+    for (const student of students) {
         if (student.group === oldName) {
             student.group = newName;
+            const row = studentToRow(student);
+            await RFT.put("students", row);
+            await RFT.enqueue("students", "upsert", row);
         }
-    });
+    }
 
     let index = groups.indexOf(oldName);
     if (index !== -1) {
@@ -1624,31 +874,19 @@ async function deleteGroup(groupId) {
 
     let replacement = groups.find(g => g !== group);
 
-    // 1. Online Sync or Offline Queueing
-    if (navigator.onLine) {
-        try {
-            if (studentCount > 0) {
-                await supabaseClient.from("students").update({ group: replacement }).eq("group", group);
-            }
-            await supabaseClient.from("groups").delete().eq("id", groupId);
-        } catch (err) {
-            console.warn("Online group deletion failed, queueing offline action...", err);
-            await addToSyncQueue("DELETE", "groups", { id: groupId });
-        }
-    } else {
-        await addToSyncQueue("DELETE", "groups", { id: groupId });
-    }
-
-    /* =========================
-       UPDATE LOCAL STUDENTS & GROUPS
-    ========================= */
     if (studentCount > 0) {
-        students.forEach(student => {
+        for (const student of students) {
             if (student.group === group) {
                 student.group = replacement;
+                const row = studentToRow(student);
+                await RFT.put("students", row);
+                await RFT.enqueue("students", "upsert", row);
             }
-        });
+        }
     }
+
+    await RFT.remove("groups", groupId);
+    await RFT.enqueue("groups", "delete", { id: groupId });
 
     groups = groups.filter(g => g !== group);
     delete groupIds[group];
@@ -1931,84 +1169,25 @@ async function addStudent() {
         return;
     }
 
-    const todayDate = today();
-    const photo = selectedStudentPhoto || "";
+    const newStudent = {
+        id: RFT.newId(),
+        name, className, roll, parent, phone, group,
+        joined: today(),
+        photo: selectedStudentPhoto || "",
+        createdAt: new Date().toISOString()
+    };
 
-    let newStudentObj = null;
+    const row = studentToRow(newStudent);
 
-    // 1. Try online insert or fallback to offline local insert & queue
-    if (navigator.onLine) {
-        try {
-            const { data, error } = await supabaseClient
-                .from("students")
-                .insert({
-                    name: name,
-                    class: className,
-                    roll: roll,
-                    parent: parent,
-                    phone: phone,
-                    group: group,
-                    date_joined: todayDate,
-                    photo: photo
-                })
-                .select()
-                .single();
+    // 1. Local-first: write to IndexedDB + in-memory immediately - works offline.
+    await RFT.put("students", row);
+    students.push(newStudent);
 
-            if (error) throw error;
-
-            newStudentObj = {
-                id: data.id,
-                name: data.name,
-                className: data.class,
-                roll: data.roll,
-                parent: data.parent,
-                phone: data.phone,
-                group: data.group,
-                joined: data.date_joined,
-                photo: data.photo || ""
-            };
-        } catch (err) {
-            console.warn("Online student add failed, falling back to offline queue...", err);
-        }
-    }
-
-    // If offline or online insert failed
-    if (!newStudentObj) {
-        const tempId = Date.now(); // Local temporary ID for local UI & DB
-        
-        const payload = {
-            id: tempId,
-            name: name,
-            class: className,
-            roll: roll,
-            parent: parent,
-            phone: phone,
-            group: group,
-            date_joined: todayDate,
-            photo: photo
-        };
-
-        // Queue for Supabase sync when connection returns
-        await addToSyncQueue("INSERT", "students", payload);
-
-        newStudentObj = {
-            id: tempId,
-            name: name,
-            className: className,
-            roll: roll,
-            parent: parent,
-            phone: phone,
-            group: group,
-            joined: todayDate,
-            photo: photo
-        };
-    }
-
-    // 2. Add to in-memory state and save locally
-    students.push(newStudentObj);
+    // 2. Queue for Supabase and try to sync now if online.
+    await RFT.enqueue("students", "upsert", row);
     saveAll();
 
-    // 3. Reset form fields
+    // 3. Reset form
     document.getElementById("studentName").value = "";
     document.getElementById("studentClass").value = "";
     document.getElementById("studentRoll").value = "";
@@ -2152,7 +1331,7 @@ function editStudent(id){
    SAVE STUDENT EDIT
 ===================================================== */
 async function saveStudentEdit() {
-    let id = Number(document.getElementById("editStudentId").value);
+    let id = document.getElementById("editStudentId").value;
 
     let student = students.find(s => s.id === id);
 
@@ -2178,19 +1357,6 @@ async function saveStudentEdit() {
         photo = selectedEditPhoto;
     }
 
-    // Prepare updated student payload
-    const updatedPayload = {
-        id: id,
-        name: name,
-        class: className,
-        roll: roll,
-        parent: parent,
-        phone: phone,
-        group: group,
-        photo: photo
-    };
-
-    // 1. Update local in-memory student record immediately
     student.name = name;
     student.className = className;
     student.roll = roll;
@@ -2199,26 +1365,13 @@ async function saveStudentEdit() {
     student.group = group;
     student.photo = photo;
 
-    // 2. Try updating online or add to sync queue if offline
-    if (navigator.onLine) {
-        try {
-            const { error } = await supabaseClient
-                .from("students")
-                .update(updatedPayload)
-                .eq("id", id);
+    const row = studentToRow(student);
 
-            if (error) throw error;
-        } catch (err) {
-            console.warn("Supabase update failed, queueing offline action...", err);
-            await addToSyncQueue("UPDATE", "students", updatedPayload);
-        }
-    } else {
-        console.log("Offline mode: Queueing student update.");
-        await addToSyncQueue("UPDATE", "students", updatedPayload);
-    }
-
-    // 3. Save to local IndexedDB/localStorage and refresh UI
+    // 1. Local-first: write to IndexedDB + in-memory immediately - works offline.
+    await RFT.put("students", row);
+    await RFT.enqueue("students", "upsert", row);
     saveAll();
+
     selectedEditPhoto = "";
     document.getElementById("editStudentBox").style.display = "none";
     renderAll();
@@ -2386,14 +1539,14 @@ onclick="toggleStudentMenu(this)">
 <div class="student-menu-dropdown">
 
 <button
-onclick="editStudent(${s.id})">
+onclick="editStudent('${s.id}')">
 ✏️
 <span>Edit Student</span>
 </button>
 
 <button
 class="delete-option"
-onclick="deleteStudent(${s.id})">
+onclick="deleteStudent('${s.id}')">
 🗑️
 <span>Delete Student</span>
 </button>
@@ -2419,145 +1572,51 @@ async function deleteStudent(id){
 
     if(!confirm(
         "⚠️ Delete this student and all their records?\n\n" +
-        "This will delete the student from the cloud database along with their attendance, fees and results."
+        "This will delete the student along with their attendance, fees and results."
     ))
         return;
 
+    // 1. Remove locally (IndexedDB + memory) immediately - this works offline.
+    await RFT.remove("students", id);
 
-    try{
+    const attendanceRows = (await RFT.getAll("attendance")).filter(r => r.student_id === id);
+    for (const row of attendanceRows) await RFT.remove("attendance", row.id);
 
-        /* =========================
-           DELETE RESULTS
-        ========================= */
+    const feeRows = (await RFT.getAll("fees")).filter(r => r.student_id === id);
+    for (const row of feeRows) await RFT.remove("fees", row.id);
 
-        let response =
-            await supabaseClient
-            .from("results")
-            .delete()
-            .eq("student_id", id);
+    const resultRows = (await RFT.getAll("results")).filter(r => r.student_id === id);
+    for (const row of resultRows) await RFT.remove("results", row.id);
 
-        if(response.error)
-            throw response.error;
+    // Cancel any not-yet-synced child records so they don't try to sync
+    // after their parent student has already been deleted server-side.
+    await purgeOutboxFor("attendance", r => r.student_id === id);
+    await purgeOutboxFor("fees", r => r.student_id === id);
+    await purgeOutboxFor("results", r => r.student_id === id);
 
+    students = students.filter(s => s.id !== id);
 
-        /* =========================
-           DELETE ATTENDANCE
-        ========================= */
+    Object.keys(attendance).forEach(date => {
+        if(attendance[date]) delete attendance[date][id];
+    });
 
-        response =
-            await supabaseClient
-            .from("attendance")
-            .delete()
-            .eq("student_id", id);
+    fees = fees.filter(f => f.studentId !== id);
 
-        if(response.error)
-            throw response.error;
+    Object.keys(results).forEach(examId => {
+        if(results[examId]) delete results[examId][id];
+    });
 
+    if(selectedHistoryStudentId === id) selectedHistoryStudentId = null;
 
-        /* =========================
-           DELETE FEES
-        ========================= */
+    // 2. Queue the student deletion for Supabase. Attendance/fees/results
+    //    rows that already made it to the server are removed automatically
+    //    via ON DELETE CASCADE.
+    await RFT.enqueue("students", "delete", { id });
+    saveAll();
 
-        response =
-            await supabaseClient
-            .from("fees")
-            .delete()
-            .eq("student_id", id);
+    renderAll();
 
-        if(response.error)
-            throw response.error;
-
-
-        /* =========================
-           DELETE STUDENT
-        ========================= */
-
-        response =
-            await supabaseClient
-            .from("students")
-            .delete()
-            .eq("id", id);
-
-        if(response.error)
-            throw response.error;
-
-
-        /* =========================
-           UPDATE LOCAL DATA
-        ========================= */
-
-        students =
-            students.filter(
-                s => s.id !== id
-            );
-
-
-        Object.keys(attendance)
-        .forEach(date => {
-
-            if(attendance[date]){
-
-                delete attendance[date][id];
-
-            }
-
-        });
-
-
-        fees =
-            fees.filter(
-                f => f.studentId !== id
-            );
-
-
-        Object.keys(results)
-        .forEach(examId => {
-
-            if(results[examId]){
-
-                delete results[examId][id];
-
-            }
-
-        });
-
-
-        if(
-            selectedHistoryStudentId === id
-        ){
-
-            selectedHistoryStudentId =
-                null;
-
-        }
-
-
-        saveAll();
-
-        renderAll();
-
-
-        alert(
-            "✅ Student and all records deleted successfully."
-        );
-
-    }
-
-
-    catch(error){
-
-        console.error(
-            "DELETE STUDENT ERROR:",
-            error
-        );
-
-
-        alert(
-            "❌ Could not delete student from cloud.\n\n" +
-            error.message
-        );
-
-    }
+    alert("✅ Student deleted. This finishes syncing to the cloud once you're online.");
 
 }
 
@@ -2615,10 +1674,22 @@ function renderAttendance(){
     table.innerHTML = "";
 
 
-    let list =
-        students.filter(
-            s => s.group === attendanceGroup
-        );
+    let search =
+        (document.getElementById("attendanceSearch")?.value || "")
+        .trim()
+        .toLowerCase();
+
+    // With a search term, look up the student across every group (so you
+    // don't have to know/select their group first) - just their date
+    // stays fixed to whatever's picked above. With no search term, fall
+    // back to the normal per-group view.
+    let list = search
+        ? students.filter(s =>
+            String(s.name || "").toLowerCase().includes(search) ||
+            String(s.roll || "").toLowerCase().includes(search) ||
+            String(s.className || "").toLowerCase().includes(search)
+          )
+        : students.filter(s => s.group === attendanceGroup);
 
 
     if(list.length === 0){
@@ -2630,7 +1701,7 @@ function renderAttendance(){
 <td colspan="4"
 class="empty">
 
-No students in this group.
+${search ? "No matching student found." : "No students in this group."}
 
 </td>
 
@@ -2676,6 +1747,8 @@ ${studentPhotoHTML(s)}
 
 <b>${escapeHTML(s.name)}</b>
 
+${search ? `<span class="small" style="display:block;">Group ${escapeHTML(s.group)}</span>` : ""}
+
 </td>
 
 <td>${escapeHTML(s.className)}</td>
@@ -2687,7 +1760,7 @@ ${studentPhotoHTML(s)}
 <button
 class="btn ${cls}"
 onclick="toggleAttendance(
-${s.id},
+'${s.id}',
 '${date}'
 )">
 
@@ -2713,62 +1786,33 @@ ${buttonText}
    TOGGLE ATTENDANCE
 ===================================================== */
 
-async function toggleAttendance(id, date) {
+async function toggleAttendance(studentId, date) {
     if (!attendance[date]) attendance[date] = {};
 
-    let current = attendance[date][id];
+    let current = attendance[date][studentId];
     let newStatus = current === "present" ? "absent" : "present";
 
-    // 1. Immediately update local state so the UI reflects the change fast
-    attendance[date][id] = newStatus;
-
-    // Prepare payload for offline sync
-    const payload = {
-        id: `${id}_${date}`, // Unique identifier for upserting
-        student_id: id,
-        date: date,
-        status: newStatus
-    };
-
-    // 2. Try updating online or add to sync queue if offline
-    if (navigator.onLine) {
-        try {
-            const { data: existing } = await supabaseClient
-                .from("attendance")
-                .select("id")
-                .eq("student_id", id)
-                .eq("date", date)
-                .maybeSingle();
-
-            if (existing) {
-                const { error } = await supabaseClient
-                    .from("attendance")
-                    .update({ status: newStatus })
-                    .eq("id", existing.id);
-
-                if (error) throw error;
-            } else {
-                const { error } = await supabaseClient
-                    .from("attendance")
-                    .insert({
-                        student_id: id,
-                        date: date,
-                        status: newStatus
-                    });
-
-                if (error) throw error;
-            }
-        } catch (err) {
-            console.warn("Supabase attendance sync failed, queueing offline action...", err);
-            await addToSyncQueue("UPSERT", "attendance", payload);
-        }
-    } else {
-        console.log("Offline mode: Queueing attendance update.");
-        await addToSyncQueue("UPSERT", "attendance", payload);
+    let id = attendanceIds[date + "|" + studentId];
+    if (!id) {
+        id = RFT.newId();
+        attendanceIds[date + "|" + studentId] = id;
     }
 
-    // 3. Save to local storage/IndexedDB & refresh UI
+    attendance[date][studentId] = newStatus;
+
+    const row = { id, student_id: studentId, date, status: newStatus };
+
+    // 1. Local-first: write to IndexedDB + in-memory immediately - works offline.
+    await RFT.put("attendance", row);
+    await RFT.enqueue("attendance", "upsert", row);
     saveAll();
+
+    // If this row was reached via the search box, clear the search after
+    // marking so the view returns to the normal group list instead of
+    // making you erase what you typed by hand.
+    let searchInput = document.getElementById("attendanceSearch");
+    if (searchInput && searchInput.value) searchInput.value = "";
+
     renderAttendance();
     renderMonthlyAttendance();
     renderDashboard();
@@ -2927,7 +1971,7 @@ ${escapeHTML(s.name)} - Group ${escapeHTML(s.group)}
 ===================================================== */
 
 async function addFee() {
-    let studentId = Number(document.getElementById("feeStudent").value);
+    let studentId = document.getElementById("feeStudent").value;
     let month = document.getElementById("feeMonth").value;
     let amount = Number(document.getElementById("feeAmount").value);
 
@@ -2946,66 +1990,40 @@ async function addFee() {
         return;
     }
 
-    const todayDate = today();
-    let newFeeObj = null;
+    const newFee = {
+        id: RFT.newId(),
+        studentId,
+        month,
+        amount,
+        paidDate: today()
+    };
 
-    // 1. Try online insert or fallback to offline queue
-    if (navigator.onLine) {
-        try {
-            const { data, error } = await supabaseClient
-                .from("fees")
-                .insert({
-                    student_id: studentId,
-                    date: todayDate,
-                    amount: amount,
-                    month: month
-                })
-                .select()
-                .single();
+    const row = feeToRow(newFee);
 
-            if (error) throw error;
+    // 1. Local-first: write to IndexedDB + in-memory immediately - works offline.
+    await RFT.put("fees", row);
+    await RFT.enqueue("fees", "upsert", row);
 
-            newFeeObj = {
-                id: data.id,
-                studentId: data.student_id,
-                month: data.month,
-                amount: Number(data.amount),
-                paidDate: data.date
-            };
-        } catch (err) {
-            console.warn("Online fee add failed, falling back to offline queue...", err);
-        }
-    }
-
-    // If offline or online insert failed
-    if (!newFeeObj) {
-        const tempId = Date.now(); // Temporary ID for local UI & DB
-
-        const payload = {
-            id: tempId,
-            student_id: studentId,
-            date: todayDate,
-            amount: amount,
-            month: month
-        };
-
-        // Queue for Supabase sync when connection returns
-        await addToSyncQueue("INSERT", "fees", payload);
-
-        newFeeObj = {
-            id: tempId,
-            studentId: studentId,
-            month: month,
-            amount: amount,
-            paidDate: todayDate
-        };
-    }
-
-    // 2. Add to local memory & store locally
-    fees.push(newFeeObj);
+    fees.push(newFee);
     saveAll();
 
-    // 3. Refresh UI
+    // Reset the form so the next entry starts clean instead of keeping
+    // the previous student/amount selected.
+    document.getElementById("feeStudent").value = "";
+    document.getElementById("feeAmount").value = "";
+
+    let selected = document.getElementById("feeSelectedStudent");
+    if (selected) {
+        selected.style.display = "none";
+        selected.innerHTML = "";
+    }
+
+    let searchInput = document.getElementById("feeStudentSearch");
+    if (searchInput) searchInput.value = "";
+
+    let searchResults = document.getElementById("feeStudentSearchResults");
+    if (searchResults) searchResults.innerHTML = "";
+
     renderFees();
     renderDashboard();
 
@@ -3071,14 +2089,14 @@ onclick="toggleFeeMenu(this)">
 <div class="fee-menu-dropdown">
 
 <button
-onclick="editFee(${f.id})">
+onclick="editFee('${f.id}')">
 ✏️
 <span>Edit Fee</span>
 </button>
 
 <button
 class="delete-option"
-onclick="deleteFee(${f.id})">
+onclick="deleteFee('${f.id}')">
 🗑️
 <span>Delete Fee</span>
 </button>
@@ -3215,25 +2233,10 @@ async function deleteFee(id) {
         return;
     }
 
-    // 1. Try online deletion or queue offline action
-    if (navigator.onLine) {
-        try {
-            const { error } = await supabaseClient
-                .from("fees")
-                .delete()
-                .eq("id", id);
+    // 1. Local-first: remove immediately, works offline.
+    await RFT.remove("fees", id);
+    await RFT.enqueue("fees", "delete", { id });
 
-            if (error) throw error;
-        } catch (err) {
-            console.warn("Online fee deletion failed, queueing offline action...", err);
-            await addToSyncQueue("DELETE", "fees", { id: id });
-        }
-    } else {
-        console.log("Offline mode: Queueing fee deletion.");
-        await addToSyncQueue("DELETE", "fees", { id: id });
-    }
-
-    // 2. Remove locally and update UI immediately
     fees = fees.filter(f => f.id !== id);
     saveAll();
 
@@ -3250,175 +2253,44 @@ async function deleteFee(id) {
 
 async function createExam(){
 
-    let name =
-        document.getElementById(
-            "examName"
-        ).value.trim();
-
-
-    let date =
-        document.getElementById(
-            "examDate"
-        ).value;
-
+    let name = document.getElementById("examName").value.trim();
+    let date = document.getElementById("examDate").value;
 
     if(!name){
-
-        alert(
-            "Please enter exam name."
-        );
-
+        alert("Please enter exam name.");
         return;
-
     }
-
 
     if(!date){
-
-        alert(
-            "Please select exam date."
-        );
-
+        alert("Please select exam date.");
         return;
-
     }
 
+    const newExam = {
+        id: RFT.newId(),
+        name,
+        date,
+        createdAt: new Date().toISOString()
+    };
+    const row = examToRow(newExam);
 
-    const { data, error } =
-        await supabaseClient
-        .from("exams")
-        .insert({
+    await RFT.put("exams", row);
+    await RFT.enqueue("exams", "upsert", row);
 
-            exam_name: name,
-
-            date: date
-
-        })
-        .select()
-        .single();
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE EXAM INSERT ERROR:",
-            error
-        );
-
-        alert(
-            "Could not save exam."
-        );
-
-        return;
-
-    }
-
-
-    exams.push({
-
-        id: data.id,
-
-        name: data.exam_name,
-
-        date: data.date
-
-    });
-
-
+    exams.push(newExam);
     saveAll();
 
-
-    document.getElementById(
-        "examName"
-    ).value = "";
-
-
-    document.getElementById(
-        "examDate"
-    ).value = "";
-
+    document.getElementById("examName").value = "";
+    document.getElementById("examDate").value = "";
 
     renderExamSelect();
 
-
-    alert(
-        "Exam created successfully."
-    );
+    alert("Exam created successfully.");
 
 }
-
-
-/* =====================================================
-   DELETE EXAM
-===================================================== */
-
-async function deleteExam(){
-
-    let select =
-        document.getElementById(
-            "examSelect"
-        );
-
-
-    let id =
-        Number(select.value);
-
-
-    if(!id){
-
-        alert(
-            "Please select an exam to delete."
-        );
-
-        return;
-
-    }
-
-
-    const { error } =
-        await supabaseClient
-        .from("exams")
-        .delete()
-        .eq("id", id);
-
-
-    if(error){
-
-        console.error(
-            "SUPABASE EXAM DELETE ERROR:",
-            error
-        );
-
-        alert(
-            "Could not delete exam:\n" +
-            error.message
-        );
-
-        return;
-
-    }
-
-
-    exams =
-        exams.filter(
-            exam => exam.id !== id
-        );
-
-
-    delete results[id];
-
-
-    saveAll();
-
-
-    renderExamSelect();
-
-
-    alert(
-        "Exam deleted successfully."
-    );
-
-}
+// deleteExam() (legacy, argument-less) removed - it was dead code, never
+// called from anywhere. deleteExamById()/deleteSelectedExam() below are
+// what the UI actually uses.
 
 
 /* =====================================================
@@ -3578,7 +2450,7 @@ function renderResults(){
         );
 
     let examId =
-        Number(select.value);
+        select.value;
 
     if(!examId){
 
@@ -3706,7 +2578,7 @@ No students found.
 <td>
     <div
         class="result-student-summary"
-        onclick="openResultStudent(${s.id})">
+        onclick="openResultStudent('${s.id}')">
 
         ${studentPhotoHTML(s)}
 
@@ -3827,8 +2699,8 @@ max="25"
 inputmode="numeric"
 value="${r.english}"
 oninput="updateMark(
-${examId},
-${s.id},
+'${examId}',
+'${s.id}',
 'english',
 this.value,
 this
@@ -3844,8 +2716,8 @@ max="25"
 inputmode="numeric"
 value="${r.nepali}"
 oninput="updateMark(
-${examId},
-${s.id},
+'${examId}',
+'${s.id}',
 'nepali',
 this.value,
 this
@@ -3861,8 +2733,8 @@ max="25"
 inputmode="numeric"
 value="${r.math}"
 oninput="updateMark(
-${examId},
-${s.id},
+'${examId}',
+'${s.id}',
 'math',
 this.value,
 this
@@ -3878,8 +2750,8 @@ max="25"
 inputmode="numeric"
 value="${r.science}"
 oninput="updateMark(
-${examId},
-${s.id},
+'${examId}',
+'${s.id}',
 'science',
 this.value,
 this
@@ -4046,8 +2918,8 @@ max="25"
 inputmode="numeric"
 value="${r.english}"
 oninput="updateMark(
-${examId},
-${studentId},
+'${examId}',
+'${studentId}',
 'english',
 this.value,
 this
@@ -4071,8 +2943,8 @@ max="25"
 inputmode="numeric"
 value="${r.nepali}"
 oninput="updateMark(
-${examId},
-${studentId},
+'${examId}',
+'${studentId}',
 'nepali',
 this.value,
 this
@@ -4096,8 +2968,8 @@ max="25"
 inputmode="numeric"
 value="${r.math}"
 oninput="updateMark(
-${examId},
-${studentId},
+'${examId}',
+'${studentId}',
 'math',
 this.value,
 this
@@ -4121,8 +2993,8 @@ max="25"
 inputmode="numeric"
 value="${r.science}"
 oninput="updateMark(
-${examId},
-${studentId},
+'${examId}',
+'${studentId}',
 'science',
 this.value,
 this
@@ -4228,49 +3100,25 @@ async function updateMark(
     input
 ){
 
-    let mark =
-        Number(value);
+    let mark = Number(value);
+    if(isNaN(mark)) mark = 0;
+    mark = Math.max(0, Math.min(25, mark));
 
-
-    if(isNaN(mark))
-        mark = 0;
-
-
-    mark =
-        Math.max(
-            0,
-            Math.min(
-                25,
-                mark
-            )
-        );
-
-
-    if(!results[examId])
-        results[examId] = {};
-
+    if(!results[examId]) results[examId] = {};
 
     if(!results[examId][studentId]){
-
         results[examId][studentId] = {
-
+            id: RFT.newId(),
             english: 0,
             nepali: 0,
             math: 0,
             science: 0
-
         };
-
     }
 
+    results[examId][studentId][subject] = mark;
 
-    results[examId][studentId][subject] =
-        mark;
-
-
-    let result =
-        results[examId][studentId];
-
+    let result = results[examId][studentId];
 
     let total =
         Number(result.english || 0) +
@@ -4278,132 +3126,32 @@ async function updateMark(
         Number(result.math || 0) +
         Number(result.science || 0);
 
+    result.total = total;
 
-    result.total =
-        total;
-
-
-    const { data: existing, error: findError } =
-        await supabaseClient
-        .from("results")
-        .select("*")
-        .eq("exam_id", examId)
-        .eq("student_id", studentId)
-        .maybeSingle();
-
-
-    if(findError){
-
-        console.error(
-            "SUPABASE RESULT FIND ERROR:",
-            findError
-        );
-
-        alert(
-            "Could not check result."
-        );
-
-        return;
-
-    }
-
-
-    let resultData = {
-
-        english:
-            Number(result.english || 0),
-
-        nepali:
-            Number(result.nepali || 0),
-
-        maths:
-            Number(result.math || 0),
-
-        science:
-            Number(result.science || 0),
-
-        total:
-            total
-
+    const row = {
+        id: result.id,
+        student_id: studentId,
+        exam_id: examId,
+        english: Number(result.english || 0),
+        nepali: Number(result.nepali || 0),
+        maths: Number(result.math || 0),
+        science: Number(result.science || 0),
+        total: total
     };
 
-
-    if(existing){
-
-        const { error } =
-            await supabaseClient
-            .from("results")
-            .update(resultData)
-            .eq("id", existing.id);
-
-
-        if(error){
-
-            console.error(
-                "SUPABASE RESULT UPDATE ERROR:",
-                error
-            );
-
-            alert(
-                "Could not update result."
-            );
-
-            return;
-
-        }
-
-    }
-    else{
-
-        const { error } =
-            await supabaseClient
-            .from("results")
-            .insert({
-
-                student_id: studentId,
-
-                exam_id: examId,
-
-                ...resultData
-
-            });
-
-
-        if(error){
-
-            console.error(
-                "SUPABASE RESULT INSERT ERROR:",
-                error
-            );
-
-            alert(
-                "Could not save result."
-            );
-
-            return;
-
-        }
-
-    }
-
-
+    // Local-first: write + queue, no live "does it exist yet" round trip
+    // needed - the id is known client-side so upsert always does the
+    // right thing whether this is a new mark or an edit.
+    await RFT.put("results", row);
+    await RFT.enqueue("results", "upsert", row);
     saveAll();
 
-
-    if(
-    selectedResultStudentId === studentId
-){
-    refreshResultDetail(
-        examId,
-        studentId
-    );
-}
-else{
-    updateResultRow(
-        examId,
-        studentId
-    );
-}
+    if(selectedResultStudentId === studentId){
+        refreshResultDetail(examId, studentId);
+    }
+    else{
+        updateResultRow(examId, studentId);
+    }
 }
 
 
@@ -4799,7 +3547,7 @@ function renderStudentHistory() {
         return;
     }
 
-    let id = Number(selectedHistoryStudentId);
+    let id = selectedHistoryStudentId;
     let student = students.find(s => s.id === id);
 
     if (!student) {
@@ -4918,16 +3666,19 @@ function renderStudentHistory() {
         <div class="panel">
             <div class="student-profile">
                 ${studentPhotoHTML(student, "student-photo-large")}
-                <div>
-                    <h3>${escapeHTML(student.name)}</h3>
-                    <p class="small">
-                        Class ${escapeHTML(student.className)} | Group ${escapeHTML(student.group)} | Roll ${escapeHTML(student.roll)}
-                    </p>
-                    <p class="small">
-                        Parent: ${escapeHTML(student.parent || "Not provided")}<br>
-                        Phone: ${escapeHTML(student.phone || "Not provided")}<br>
-                        Joined: ${escapeHTML(student.joined || "Not available")}
-                    </p>
+                <div class="recent-student-info">
+                    <h4>${escapeHTML(student.name)}</h4>
+                    <div class="recent-student-meta">
+                        <span>Class ${escapeHTML(student.className)}</span>
+                        <span>Roll ${escapeHTML(student.roll)}</span>
+                        <span>Group ${escapeHTML(student.group)}</span>
+                    </div>
+                    <div class="recent-student-contact">
+                        👨‍👩‍👦 ${escapeHTML(student.parent || "Not provided")} &nbsp;•&nbsp; 📞 ${escapeHTML(student.phone || "Not provided")}
+                    </div>
+                    <div class="recent-student-contact">
+                        🗓️ Joined ${escapeHTML(student.joined || "Not available")}
+                    </div>
                 </div>
             </div>
         </div>
@@ -5023,11 +3774,14 @@ function renderStudentHistory() {
 ===================================================== */
 function renderDashboard(){
 
-    /* Display Today's Date */
-    let dateElement = document.getElementById("dashboardDate");
-    if (dateElement) {
-        let options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
-        dateElement.innerText = new Date().toLocaleDateString(undefined, options);
+    let dashboardDateEl = document.getElementById("dashboardDate");
+    if (dashboardDateEl) {
+        dashboardDateEl.innerText = new Date().toLocaleDateString(undefined, {
+            weekday: "long",
+            year: "numeric",
+            month: "long",
+            day: "numeric"
+        });
     }
 
     document.getElementById("totalStudents").innerText = students.length;
@@ -5079,17 +3833,17 @@ function renderDashboard(){
 
     Object.values(attendance).forEach(day => {
         Object.keys(day).forEach(studentId => {
-            studentsWithRecords.add(Number(studentId));
+            studentsWithRecords.add(studentId);
         });
     });
 
     fees.forEach(fee => {
-        studentsWithRecords.add(Number(fee.studentId));
+        studentsWithRecords.add(fee.studentId);
     });
 
     Object.values(results).forEach(examResults => {
         Object.keys(examResults).forEach(studentId => {
-            studentsWithRecords.add(Number(studentId));
+            studentsWithRecords.add(studentId);
         });
     });
 
@@ -5130,6 +3884,7 @@ function renderDashboard(){
     html += `</div>`;
     container.innerHTML = html;
 }
+
 
 /* =====================================================
    BACKUP
@@ -5692,32 +4447,7 @@ document.getElementById(
    START APP
 ===================================================== */
 
-async function startApp(){
-  console.log("START APP: beginning");
-
-    try{
-
-        await openOfflineDatabase();
-      console.log("START APP: offline database finished");
-
-    }
-    catch(error){
-
-        console.error(
-            "Could not initialize offline database:",
-            error
-        );
-
-    }
-
-    await loadGroupsFromSupabase();
-    await loadStudentsFromSupabase();
-    await loadAttendanceFromSupabase();
-    await loadFeesFromSupabase();
-    await loadExamsFromSupabase();
-    await loadResultsFromSupabase();
-
-}
+// startApp() removed - initApp() (see top of file) is now the single startup path.
 
 function toggleExamMenu(button){
 
@@ -5746,248 +4476,111 @@ function toggleExamMenu(button){
 }
 function editSelectedExam(){
 
-    let select =
-        document.getElementById(
-            "examSelect"
-        );
-
-    let examId =
-        Number(select.value);
+    let select = document.getElementById("examSelect");
+    let examId = select.value;
 
     if(!examId){
-        alert(
-            "Please select an exam first."
-        );
+        alert("Please select an exam first.");
         return;
     }
 
-    let exam =
-        exams.find(
-            e => Number(e.id) === examId
-        );
-
+    let exam = exams.find(e => e.id === examId);
     if(!exam){
-        alert(
-            "Exam not found."
-        );
+        alert("Exam not found.");
         return;
     }
 
-    let newName =
-        prompt(
-            "Enter new exam name:",
-            exam.name
-        );
-
-    if(newName === null)
-        return;
-
-    newName =
-        newName.trim();
-
+    let newName = prompt("Enter new exam name:", exam.name);
+    if(newName === null) return;
+    newName = newName.trim();
     if(!newName){
-        alert(
-            "Exam name cannot be empty."
-        );
+        alert("Exam name cannot be empty.");
         return;
     }
 
-    let newDate =
-        prompt(
-            "Enter exam date (YYYY-MM-DD):",
-            exam.date || ""
-        );
-
-    if(newDate === null)
-        return;
-
-    newDate =
-        newDate.trim();
-
+    let newDate = prompt("Enter exam date (YYYY-MM-DD):", exam.date || "");
+    if(newDate === null) return;
+    newDate = newDate.trim();
     if(!newDate){
-        alert(
-            "Exam date cannot be empty."
-        );
+        alert("Exam date cannot be empty.");
         return;
     }
 
-    editExamInSupabase(
-        examId,
-        newName,
-        newDate
-    );
-
+    editExamLocal(examId, newName, newDate);
 }
-async function editExamInSupabase(
-    examId,
-    newName,
-    newDate
-){
 
-    const { error } =
-        await supabaseClient
-        .from("exams")
-        .update({
-            exam_name: newName,
-            date: newDate
-        })
-        .eq("id", examId);
+async function editExamLocal(examId, newName, newDate){
 
-    if(error){
+    let exam = exams.find(e => e.id === examId);
+    if(!exam) return;
 
-        console.error(
-            "SUPABASE EXAM UPDATE ERROR:",
-            error
-        );
+    exam.name = newName;
+    exam.date = newDate;
 
-        alert(
-            "Could not update exam:\n" +
-            error.message
-        );
-
-        return;
-    }
-
-    let exam =
-        exams.find(
-            e => Number(e.id) === examId
-        );
-
-    if(exam){
-
-        exam.name =
-            newName;
-
-        exam.date =
-            newDate;
-
-    }
+    const row = examToRow(exam);
+    await RFT.put("exams", row);
+    await RFT.enqueue("exams", "upsert", row);
+    saveAll();
 
     renderExamSelect();
-
     renderResults();
 
-    alert(
-        "✅ Exam updated successfully."
-    );
+    alert("✅ Exam updated successfully.");
 
 }
+
 function deleteSelectedExam(){
 
-    let select =
-        document.getElementById(
-            "examSelect"
-        );
-
-    let examId =
-        Number(select.value);
+    let select = document.getElementById("examSelect");
+    let examId = select.value;
 
     if(!examId){
-        alert(
-            "Please select an exam first."
-        );
+        alert("Please select an exam first.");
         return;
     }
 
     deleteExamById(examId);
 
 }
+
 async function deleteExamById(id){
 
-    let exam =
-        exams.find(
-            e => Number(e.id) === Number(id)
-        );
+    let exam = exams.find(e => e.id === id);
 
     if(!exam){
-        alert(
-            "Exam not found."
-        );
+        alert("Exam not found.");
         return;
     }
 
-    let confirmed =
-        confirm(
-            "⚠️ Delete this exam?\n\n" +
-            "Exam: " + exam.name + "\n\n" +
-            "All student marks/results for this exam will also be permanently deleted.\n\n" +
-            "This action cannot be undone.\n\n" +
-            "Are you sure?"
-        );
+    let confirmed = confirm(
+        "⚠️ Delete this exam?\n\n" +
+        "Exam: " + exam.name + "\n\n" +
+        "All student marks/results for this exam will also be permanently deleted.\n\n" +
+        "This action cannot be undone.\n\n" +
+        "Are you sure?"
+    );
 
-    if(!confirmed)
-        return;
+    if(!confirmed) return;
 
+    // 1. Remove locally (IndexedDB + memory) immediately - works offline.
+    await RFT.remove("exams", id);
 
-    // First delete all results belonging to this exam
-    let response =
-        await supabaseClient
-        .from("results")
-        .delete()
-        .eq("exam_id", id);
+    const resultRows = (await RFT.getAll("results")).filter(r => r.exam_id === id);
+    for (const row of resultRows) await RFT.remove("results", row.id);
+    await purgeOutboxFor("results", r => r.exam_id === id);
 
-
-    if(response.error){
-
-        console.error(
-            "SUPABASE RESULT DELETE ERROR:",
-            response.error
-        );
-
-        alert(
-            "Could not delete exam results:\n" +
-            response.error.message
-        );
-
-        return;
-    }
-
-
-    // Now delete the exam itself
-    response =
-        await supabaseClient
-        .from("exams")
-        .delete()
-        .eq("id", id);
-
-
-    if(response.error){
-
-        console.error(
-            "SUPABASE EXAM DELETE ERROR:",
-            response.error
-        );
-
-        alert(
-            "Could not delete exam:\n" +
-            response.error.message
-        );
-
-        return;
-    }
-
-
-    // Update local data
-    exams =
-        exams.filter(
-            exam =>
-                Number(exam.id) !== Number(id)
-        );
-
-
+    exams = exams.filter(exam => exam.id !== id);
     delete results[id];
 
-
+    // 2. Queue the exam deletion for Supabase. Matching results rows that
+    //    already made it to the server are removed via ON DELETE CASCADE.
+    await RFT.enqueue("exams", "delete", { id });
     saveAll();
 
     renderExamSelect();
-
     renderResults();
 
-
-    alert(
-        "✅ Exam and all its results were deleted successfully."
-    );
+    alert("✅ Exam and all its results were deleted successfully.");
 
 }
 document.addEventListener(
@@ -6120,96 +4713,44 @@ document.addEventListener(
 );
 async function editFee(id){
 
-    let fee =
-        fees.find(
-            f => Number(f.id) === Number(id)
-        );
+    let fee = fees.find(f => f.id === id);
 
     if(!fee){
         alert("Fee record not found.");
         return;
     }
 
-    let newMonth =
-        prompt(
-            "Enter fee month (YYYY-MM):",
-            fee.month
-        );
-
-    if(newMonth === null)
-        return;
-
-    newMonth =
-        newMonth.trim();
-
+    let newMonth = prompt("Enter fee month (YYYY-MM):", fee.month);
+    if(newMonth === null) return;
+    newMonth = newMonth.trim();
     if(!newMonth){
         alert("Month cannot be empty.");
         return;
-    }
-
-    let newAmount =
-        prompt(
-            "Enter fee amount:",
-            fee.amount
-        );
-
-    if(newAmount === null)
-        return;
-
-    newAmount =
-        newAmount.trim();
-
+ }
+    let newAmount = prompt("Enter fee amount:", fee.amount);
+    if(newAmount === null) return;
+    newAmount = newAmount.trim();
     if(!newAmount){
         alert("Amount cannot be empty.");
         return;
     }
-
-    let amount =
-        Number(newAmount);
-
-    if(
-        !Number.isFinite(amount) ||
-        amount < 0
-    ){
+    let amount = Number(newAmount);
+    if(!Number.isFinite(amount) || amount < 0){
         alert("Please enter a valid amount.");
         return;
     }
 
-    const { error } =
-        await supabaseClient
-        .from("fees")
-        .update({
-            month: newMonth,
-            amount: amount
-        })
-        .eq("id", id);
+    fee.month = newMonth;
+    fee.amount = amount;
 
-    if(error){
-
-        console.error(
-            "SUPABASE FEE UPDATE ERROR:",
-            error
-        );
-
-        alert(
-            "Could not update fee:\n" +
-            error.message
-        );
-
-        return;
-    }
-
-    fee.month =
-        newMonth;
-
-    fee.amount =
-        amount;
+    const row = feeToRow(fee);
+    await RFT.put("fees", row);
+    await RFT.enqueue("fees", "upsert", row);
+    saveAll();
 
     renderFees();
 
-    alert(
-        "✅ Fee updated successfully."
-    );
+    alert("✅ Fee updated successfully.");
 
 }
 window.addEventListener("load", function(){
@@ -6218,225 +4759,9 @@ window.addEventListener("load", function(){
 
         const splash =
             document.getElementById("appSplash");
-
         if(splash){
             splash.remove();
         }
-
     }, 2100);
-
 });
-/* =====================================================
-   OFFLINE DATABASE — INDEXEDDB
-===================================================== */
-
-const OFFLINE_DB_NAME = "RampurFreeTuitionOfflinev2";
-const OFFLINE_DB_VERSION = 3;
-
-let offlineDB = null;
-
-
-/* =====================================================
-   SAFE STARTUP & DATA INITIALIZATION
-===================================================== */
-async function loadAllAppData() {
-    // Only proceed if offlineDB is open and ready
-    if (!offlineDB) {
-        try {
-            await openOfflineDatabase();
-        } catch (err) {
-            console.error("Could not initialize offline database:", err);
-            return;
-        }
-    }
-
-    if (navigator.onLine) {
-        try {
-            // Process any pending sync items first
-            await processSyncQueue();
-
-            // Load fresh data from Supabase
-            await loadGroupsFromSupabase();
-            await loadStudentsFromSupabase();
-            await loadAttendanceFromSupabase();
-            await loadFeesFromSupabase();
-            await loadExamsFromSupabase();
-            await loadResultsFromSupabase();
-
-            // Cache all online data into IndexedDB for offline use
-            await cacheAllDataToOfflineDB();
-
-            renderAll();
-            return;
-        } catch (err) {
-            console.warn("Cloud load failed, falling back to offline database...", err);
-        }
-    }
-
-    // Always fallback to loading ALL tables from IndexedDB when offline
-    await loadGroupsFromOfflineDB();
-    await loadStudentsFromOfflineDB();
-    await loadAttendanceFromOfflineDB();
-    await loadFeesFromOfflineDB();
-    await loadExamsFromOfflineDB();
-    await loadResultsFromOfflineDB();
-
-    renderAll();
-}
-
-// Safe helper to cache all in-memory data into IndexedDB when online
-async function cacheAllDataToOfflineDB() {
-    if (!offlineDB) return;
-
-    // Helper wrapper to safely write to a specific store without crashing the app
-    const safeCacheStore = (storeName, dataItems) => {
-        try {
-            const tx = offlineDB.transaction(storeName, "readwrite");
-            const store = tx.objectStore(storeName);
-            store.clear();
-
-            if (Array.isArray(dataItems)) {
-                dataItems.forEach(item => {
-                    if (item && item.id !== undefined && item.id !== null) {
-                        store.put(item);
-                    }
-                });
-            }
-        } catch (err) {
-            console.warn(`IndexedDB cache warning for store '${storeName}':`, err);
-        }
-    };
-
-    // 1. Cache Groups (convert group name strings back to { id, name } objects)
-    const formattedGroups = (groups || []).map(gName => {
-        const id = groupIds[gName] || Date.now();
-        return { id: id, name: gName };
-    });
-    safeCacheStore("groups", formattedGroups);
-
-    // 2. Cache Students
-    safeCacheStore("students", students || []);
-
-    // 3. Cache Attendance
-    const attendanceArray = [];
-    if (attendance) {
-        Object.keys(attendance).forEach(date => {
-            if (attendance[date]) {
-                Object.keys(attendance[date]).forEach(studentId => {
-                    attendanceArray.push({
-                        id: `${studentId}_${date}`,
-                        student_id: Number(studentId) || studentId,
-                        date: date,
-                        status: attendance[date][studentId]
-                    });
-                });
-            }
-        });
-    }
-    safeCacheStore("attendance", attendanceArray);
-
-    // 4. Cache Fees
-    safeCacheStore("fees", fees || []);
-
-    // 5. Cache Exams
-    safeCacheStore("exams", exams || []);
-
-    // 6. Cache Results
-    const resultsArray = [];
-    if (results) {
-        Object.keys(results).forEach(examId => {
-            if (results[examId]) {
-                Object.keys(results[examId]).forEach(studentId => {
-                    const r = results[examId][studentId];
-                    resultsArray.push({
-                        id: `${examId}_${studentId}`,
-                        exam_id: Number(examId) || examId,
-                        student_id: Number(studentId) || studentId,
-                        english: r.english || 0,
-                        nepali: r.nepali || 0,
-                        math: r.math || 0,
-                        science: r.science || 0
-                    });
-                });
-            }
-        });
-    }
-    safeCacheStore("results", resultsArray);
-}
-
-/* =====================================================
-   ATTENDANCE QUICK LOOKUP MODAL LOGIC
-===================================================== */
-
-function openAttendanceSearchModal() {
-    let modal = document.getElementById("attendanceSearchModal");
-    let modalDate = document.getElementById("modalSearchDate");
-    let mainDate = document.getElementById("attendanceDate");
-
-    // Default modal date to the currently selected attendance date or today
-    if (modalDate) {
-        modalDate.value = (mainDate && mainDate.value) ? mainDate.value : today();
-    }
-
-    if (modal) {
-        modal.style.display = "flex";
-        document.getElementById("modalSearchStudentInput").focus();
-    }
-
-    performAttendanceLookup();
-}
-
-function closeAttendanceSearchModal() {
-    let modal = document.getElementById("attendanceSearchModal");
-    if (modal) modal.style.display = "none";
-}
-
-function performAttendanceLookup() {
-    let searchDate = document.getElementById("modalSearchDate")?.value;
-    let query = document.getElementById("modalSearchStudentInput")?.value.trim().toLowerCase();
-    let resultContainer = document.getElementById("attendanceSearchResult");
-
-    if (!resultContainer) return;
-
-    if (!searchDate) {
-        resultContainer.innerHTML = `<p class="text-muted">Please select a date first.</p>`;
-        return;
-    }
-
-    let dayData = attendance[searchDate] || {};
-
-    // Filter students by query name or roll number
-    let filteredStudents = students.filter(s => {
-        let nameMatch = s.name.toLowerCase().includes(query);
-        let rollMatch = String(s.roll || "").toLowerCase().includes(query);
-        return query === "" || nameMatch || rollMatch;
-    });
-
-    if (filteredStudents.length === 0) {
-        resultContainer.innerHTML = `<div class="lookup-empty">No student found matching "<b>${escapeHTML(query)}</b>"</div>`;
-        return;
-    }
-
-    let html = `<div class="lookup-results-list">`;
-
-    filteredStudents.forEach(s => {
-        let status = dayData[s.id]; // "present", "absent", or undefined
-        let badgeClass = status === "present" ? "badge-present" : (status === "absent" ? "badge-absent" : "badge-unmarked");
-        let statusLabel = status === "present" ? "✅ Present" : (status === "absent" ? "❌ Absent" : "⚠️ Not Marked");
-
-        html += `
-            <div class="lookup-card">
-                <div class="lookup-student-details">
-                    <strong>${escapeHTML(s.name)}</strong>
-                    <div class="lookup-meta">Class: ${escapeHTML(s.className)} | Roll: ${escapeHTML(s.roll)} | Group: ${escapeHTML(s.group)}</div>
-                </div>
-                <div class="lookup-status-badge ${badgeClass}">
-                    ${statusLabel}
-                </div>
-            </div>
-        `;
-    });
-
-    html += `</div>`;
-    resultContainer.innerHTML = html;
-}
+// (offline database v1 removed - offline-core.js + initApp()/syncNow() at the top of this file now own this)
