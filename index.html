@@ -13,6 +13,7 @@
 <link rel="stylesheet" href="style.css">
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="offline-core.js"></script>
   
 </head>
 
@@ -99,6 +100,11 @@
 <header>
 <h1>🎓 Rampur Free Tuition Center</h1>
 <p>Personal Student Records</p>
+<div class="status-bar">
+<span id="connectionBadge" class="connection-badge">🟢 Online</span>
+<span id="syncBadge" class="sync-badge">✅ All changes synced</span>
+<button type="button" class="sync-now-button" onclick="syncNow()">🔄 Sync now</button>
+</div>
 </header>
 
 
@@ -906,109 +912,107 @@
 </div>
 
 </section>
-<!-- =========================
-     ATTENDANCE SECTION
-========================= -->
-<section id="attendance" class="section">
 
-  <h2>Daily Attendance</h2>
 
-  <!-- Daily Attendance Panel -->
-  <div class="panel">
-
-    <div class="attendance-top-bar">
-      <div class="month-box">
-        <label for="attendanceDate"><b>Select Date:</b></label>
-        <input type="date" id="attendanceDate" onchange="renderAttendance()">
-      </div>
-
-      <!-- Quick Student Lookup Button -->
-      <button type="button" class="btn btn-search-attendance" onclick="openAttendanceSearchModal()">
-        🔍 Find Student Attendance
-      </button>
-    </div>
-
-    <div class="group-buttons" id="attendanceGroupButtons"></div>
-
-    <p class="small">
-      Select a date, then mark every student Present or Absent.
-    </p>
-
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>Student</th>
-            <th>Class</th>
-            <th>Roll</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody id="attendanceTable"></tbody>
-      </table>
-    </div>
-
-  </div>
-
-  <!-- Monthly Attendance Summary Panel -->
-  <div class="panel">
-
-    <h3>Monthly Attendance Summary</h3>
-
-    <div class="month-box">
-      <input type="month" id="attendanceMonth" onchange="renderMonthlyAttendance()">
-    </div>
-
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>Student</th>
-            <th>Present</th>
-            <th>Absent</th>
-            <th>Total Recorded</th>
-            <th>Percentage</th>
-          </tr>
-        </thead>
-        <tbody id="monthlyAttendanceTable"></tbody>
-      </table>
-    </div>
-
-  </div>
-
-</section>
 
 <!-- =========================
-     ATTENDANCE SEARCH MODAL
+     ATTENDANCE
 ========================= -->
-<div id="attendanceSearchModal" class="modal-overlay" style="display: none;">
-  <div class="modal-content attendance-modal">
-    <div class="modal-header">
-      <h3>🔍 Quick Attendance Lookup</h3>
-      <button class="close-modal-btn" onclick="closeAttendanceSearchModal()">✕</button>
-    </div>
+  <section id="attendance" class="section">
 
-    <div class="modal-body">
-      <div class="search-field-group">
-        <label><b>1. Select Date:</b></label>
-        <input type="date" id="modalSearchDate" onchange="performAttendanceLookup()">
-      </div>
+<h2>Daily Attendance</h2>
 
-      <div class="search-field-group">
-        <label><b>2. Search Student Name / Roll:</b></label>
-        <input 
-          type="text" 
-          id="modalSearchStudentInput" 
-          placeholder="Type student name or roll..." 
-          oninput="performAttendanceLookup()">
-      </div>
+<div class="panel">
 
-      <div id="attendanceSearchResult" class="search-result-box">
-        <p class="text-muted">Select a date and type a student name to check attendance status.</p>
-      </div>
-    </div>
-  </div>
+<div class="month-box">
+
+<label>
+<b>Select Date:</b>
+</label>
+
+<input
+type="date"
+id="attendanceDate"
+onchange="renderAttendance()">
+
 </div>
+
+<div
+class="group-buttons"
+id="attendanceGroupButtons">
+</div>
+
+<input
+type="text"
+id="attendanceSearch"
+placeholder="🔎 Search any student by name, roll or class (searches all groups)..."
+oninput="renderAttendance()"
+style="width:100%; box-sizing:border-box; margin-bottom:10px;">
+
+<p class="small">
+Select a date, then mark every student Present or Absent.
+</p>
+
+<div class="table-scroll">
+
+<table>
+
+<thead>
+<tr>
+<th>Student</th>
+<th>Class</th>
+<th>Roll</th>
+<th>Status</th>
+</tr>
+</thead>
+
+<tbody id="attendanceTable"></tbody>
+
+</table>
+
+</div>
+
+</div>
+
+
+<div class="panel">
+
+<h3>Monthly Attendance Summary</h3>
+
+<div class="month-box">
+
+<input
+type="month"
+id="attendanceMonth"
+onchange="renderMonthlyAttendance()">
+
+</div>
+
+<div class="table-scroll">
+
+<table>
+
+<thead>
+
+<tr>
+<th>Student</th>
+<th>Present</th>
+<th>Absent</th>
+<th>Total Recorded</th>
+<th>Percentage</th>
+</tr>
+
+</thead>
+
+<tbody id="monthlyAttendanceTable"></tbody>
+
+</table>
+
+</div>
+
+</div>
+
+  </section>
 
 <!-- =========================
      FEES
