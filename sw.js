@@ -11,7 +11,7 @@
    on stale cached JS/CSS.
    ========================================================= */
 
-const CACHE_NAME = "rampur-free-tuition-v8";
+const CACHE_NAME = "rampur-free-tuition-v9";
 
 const APP_SHELL = [
     "./",
@@ -78,6 +78,15 @@ function isSupabaseRequest(url) {
     return url.includes(".supabase.co");
 }
 
+// This app's own code - must never go stale for long. Network-first so an
+// online teacher always runs the version you just deployed; only falls
+// back to the cached copy when there's no network at all.
+const CORE_APP_FILES = ["/script.js", "/offline-core.js", "/style.css"];
+
+function isCoreAppFile(url) {
+    return CORE_APP_FILES.some(name => url.endsWith(name));
+}
+
 self.addEventListener("fetch", event => {
 
     const request = event.request;
@@ -107,9 +116,31 @@ self.addEventListener("fetch", event => {
         return;
     }
 
-    // Everything else (JS/CSS/icons/CDN libs): cache-first, and
+    if (isCoreAppFile(url)) {
+        // Network-first: always try to get the latest script.js/
+        // offline-core.js/style.css when online, so a fresh GitHub
+        // deploy is picked up on the very next load instead of one
+        // session later. Offline (or a failed fetch) falls back to
+        // whatever was last cached.
+        event.respondWith(
+            fetch(request)
+                .then(response => {
+                    if (response && response.ok) {
+                        const copy = response.clone();
+                        caches.open(CACHE_NAME).then(cache => cache.put(request, copy));
+                    }
+                    return response;
+                })
+                .catch(() => caches.match(request))
+        );
+        return;
+    }
+
+    // Everything else (icons/manifest/CDN libs): cache-first, and
     // opportunistically refresh the cache when a network fetch
     // does succeed, so the next offline session has the latest copy.
+    // These change rarely, so the small staleness window is an
+    // acceptable trade for faster loads.
     event.respondWith(
         caches.match(request).then(cached => {
             const networkFetch = fetch(request)
