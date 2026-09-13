@@ -287,88 +287,9 @@
 </div>
 
 
-<div class="group-stat-grid">
-
-    <div class="group-stat-card group-a-card">
-
-        <div class="group-stat-icon">
-            A
-        </div>
-
-        <div class="group-stat-info">
-
-            <span>GROUP A</span>
-
-            <strong id="groupA">
-                0
-            </strong>
-
-            <small>
-                Students
-            </small>
-
-        </div>
-
-        <div class="group-stat-decoration">
-            A
-        </div>
-
-    </div>
-
-
-    <div class="group-stat-card group-b-card">
-
-        <div class="group-stat-icon">
-            B
-        </div>
-
-        <div class="group-stat-info">
-
-            <span>GROUP B</span>
-
-            <strong id="groupB">
-                0
-            </strong>
-
-            <small>
-                Students
-            </small>
-
-        </div>
-
-        <div class="group-stat-decoration">
-            B
-        </div>
-
-    </div>
-
-
-    <div class="group-stat-card group-c-card">
-
-        <div class="group-stat-icon">
-            C
-        </div>
-
-        <div class="group-stat-info">
-
-            <span>GROUP C</span>
-
-            <strong id="groupC">
-                0
-            </strong>
-
-            <small>
-                Students
-            </small>
-
-        </div>
-
-        <div class="group-stat-decoration">
-            C
-        </div>
-
-    </div>
-
+<div class="group-stat-grid" id="dashboardGroupStats">
+    <!-- populated dynamically in renderDashboard() - one card per
+         actual group (A/B/C first if they exist, then any others) -->
 </div>
   <!-- =========================
      TUITION OVERVIEW
@@ -888,24 +809,7 @@
 
     <div class="student-table-wrapper">
 
-        <table>
-
-            <thead>
-
-                <tr>
-                    <th>Student</th>
-                    <th>Class</th>
-                    <th>Roll</th>
-                    <th>Parent</th>
-                    <th>Phone</th>
-                    <th>Action</th>
-                </tr>
-
-            </thead>
-
-            <tbody id="studentTable"></tbody>
-
-        </table>
+        <div class="student-cards" id="studentTable"></div>
 
     </div>
 
@@ -1082,23 +986,14 @@ Save Fee
 
 <h3>Fee History</h3>
 
-<table>
+<input
+type="text"
+id="feeHistorySearch"
+placeholder="🔎 Search by student name..."
+oninput="renderFees()"
+style="width:100%; box-sizing:border-box; margin-bottom:10px;">
 
-<thead>
-
-<tr>
-<th>Student</th>
-<th>Month</th>
-<th>Amount</th>
-<th>Status</th>
-<th>Action</th>
-</tr>
-
-</thead>
-
-<tbody id="feeTable"></tbody>
-
-</table>
+<div class="fee-cards" id="feeTable"></div>
 
 </div>
 
@@ -1387,6 +1282,18 @@ Groups:
 
   <script>
 if ("serviceWorker" in navigator) {
+    // When a newly-activated Service Worker takes control of this page
+    // (i.e. a fresh deploy just landed), reload once so the tab actually
+    // runs the new script.js/CSS instead of continuing on the version
+    // that was already loaded into memory. Guarded so it can only ever
+    // fire once per page load, never a reload loop.
+    let refreshedAfterUpdate = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (refreshedAfterUpdate) return;
+        refreshedAfterUpdate = true;
+        window.location.reload();
+    });
+
     window.addEventListener("load", () => {
         navigator.serviceWorker.register("./sw.js")
             .then(() => console.log("Service Worker registered"))
@@ -1396,4 +1303,4 @@ if ("serviceWorker" in navigator) {
   </script>
   
 </body>
-</html>
+  </html>
