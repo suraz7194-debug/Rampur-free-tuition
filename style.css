@@ -855,7 +855,7 @@ th{
     display:grid;
 
     grid-template-columns:
-        repeat(3,minmax(0,1fr));
+        repeat(auto-fit,minmax(140px,1fr));
 
     gap:12px;
 
@@ -1997,11 +1997,7 @@ SMALL PHONES
 /* DROPDOWN */
 
 #students .group-menu-dropdown{
-    position:absolute;
-
-    right:0;
-
-    top:40px;
+    position:fixed; /* actual top/left are computed in JS (positionFloatingMenu) so it never gets clipped or opens off-screen */
 
     z-index:50;
 
@@ -2148,9 +2144,7 @@ SMALL PHONES
 }
 
 #results .exam-menu-dropdown{
-    position:absolute;
-    right:0;
-    top:42px;
+    position:fixed; /* actual top/left are computed in JS (positionFloatingMenu) so it never gets clipped or opens off-screen */
 
     z-index:50;
 
@@ -2352,9 +2346,7 @@ SMALL PHONES
 }
 
 #students .student-menu-dropdown{
-    position:absolute;
-    right:0;
-    top:42px;
+    position:fixed; /* actual top/left are computed in JS (positionFloatingMenu) so it never gets clipped or opens off-screen */
     z-index:100;
     min-width:160px;
     padding:5px;
@@ -2511,9 +2503,7 @@ SMALL PHONES
 }
 
 #fees .fee-menu-dropdown{
-    position:absolute;
-    right:0;
-    top:42px;
+    position:fixed; /* actual top/left are computed in JS (positionFloatingMenu) so it never gets clipped or opens off-screen */
 
     z-index:100;
 
@@ -3657,4 +3647,90 @@ body{
 
 .sync-now-button:hover {
     background: rgba(255, 255, 255, 0.3);
+}
+
+/* =====================================================
+   PHONE tel: LINK
+===================================================== */
+
+.phone-link {
+    color: inherit;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+}
+
+.phone-link:active {
+    opacity: 0.6;
+}
+
+/* =====================================================
+   STUDENT LIST (card layout - matches the dashboard's
+   "recently added students" look, no side-scrolling needed)
+===================================================== */
+
+.student-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+}
+
+.student-list-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 14px;
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.student-list-card-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.student-list-name {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #1e293b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.student-list-card .student-menu {
+    flex-shrink: 0;
+}
+
+.fee-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+}
+
+.student-list-card .fee-menu {
+    flex-shrink: 0;
+}
+
+/* Pills and contact line get the FULL card width (indented to line up
+   under the name, past the photo) - nothing shares this row with the
+   menu button anymore, so nothing has to compete for space with it. */
+.student-list-card .recent-student-meta {
+    margin-left: 54px;
+}
+
+.student-list-card .recent-student-contact {
+    margin-left: 54px;
+    /* Unlike the compact dashboard preview, the Student List is where you
+       actually look up a number - it should never be cut off. */
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
 }
