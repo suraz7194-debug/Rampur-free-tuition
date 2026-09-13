@@ -170,7 +170,8 @@ function studentToRow(s) {
         phone: s.phone,
         group: s.group,
         date_joined: s.joined,
-        photo: s.photo || ""
+        photo: s.photo || "",
+        updated_at: new Date().toISOString()
     };
     if (s.createdAt) row.created_at = s.createdAt;
     return row;
@@ -180,14 +181,14 @@ function feeFromRow(row) {
     return { id: row.id, studentId: row.student_id, month: row.month, amount: Number(row.amount), paidDate: row.date };
 }
 function feeToRow(f) {
-    return { id: f.id, student_id: f.studentId, month: f.month, amount: Number(f.amount), date: f.paidDate };
+    return { id: f.id, student_id: f.studentId, month: f.month, amount: Number(f.amount), date: f.paidDate, updated_at: new Date().toISOString() };
 }
 
 function examFromRow(row) {
     return { id: row.id, name: row.exam_name, date: row.date, createdAt: row.created_at || null };
 }
 function examToRow(e) {
-    const row = { id: e.id, exam_name: e.name, date: e.date };
+    const row = { id: e.id, exam_name: e.name, date: e.date, updated_at: new Date().toISOString() };
     if (e.createdAt) row.created_at = e.createdAt;
     return row;
 }
@@ -214,7 +215,8 @@ function rebuildResultsCache(rows) {
             nepali: Number(row.nepali || 0),
             math: Number(row.maths || 0),
             science: Number(row.science || 0),
-            total: Number(row.total || 0)
+            total: Number(row.total || 0),
+            createdAt: row.created_at || null
         };
     });
 }
@@ -223,16 +225,81 @@ function rebuildGroupsCache(rows) {
     let sorted = rows.slice().sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
 
     groupIds = {};
-    groups = sorted.map(row => String(row.name).trim()).filter(Boolean);
+    let names = sorted.map(row => String(row.name).trim()).filter(Boolean);
     sorted.forEach(row => { groupIds[String(row.name).trim()] = row.id; });
 
-    if (groups.length === 0) {
-        groups = ["A"];
+    if (names.length === 0) {
+        names = ["A"];
     }
+
+    groups = sortGroupsPreferred(names);
 
     studentGroup = groups.includes(studentGroup) ? studentGroup : groups[0];
     attendanceGroup = groups.includes(attendanceGroup) ? attendanceGroup : groups[0];
     resultGroup = groups.includes(resultGroup) ? resultGroup : groups[0];
+}
+
+/* =====================================================
+   GROUP DISPLAY ORDER (used everywhere groups are listed -
+   Students tabs, Attendance/Results group buttons, and the
+   dashboard cards)
+
+   Groups A, B and C are the app's original defaults, so they
+   always appear first (in that order) if they exist. Any other
+   group - however many get added - appears afterward, in the
+   order it was created.
+===================================================== */
+
+function sortGroupsPreferred(names) {
+    let preferred = ["A", "B", "C"].filter(name => names.includes(name));
+    let rest = names.filter(name => !preferred.includes(name));
+    return preferred.concat(rest);
+}
+
+/* =====================================================
+   RECONCILE ORPHAN GROUPS
+
+   students.group is a plain text field, not a foreign key, so
+   it's possible for a student to carry a group name (e.g. from
+   an older/imported record, or one created on another device in
+   a race with the groups table) that has no matching row in the
+   groups table. When that happens, that name never showed up as
+   a tab/button anywhere driven by the groups list - the student
+   was still there, but their group was effectively invisible.
+
+   This self-heals it: any group name actually in use by a
+   student that isn't already a real group gets a proper row
+   created for it (locally + queued to Supabase), so it becomes a
+   normal, fully-functional group from then on.
+===================================================== */
+
+async function reconcileOrphanGroups() {
+    let changed = false;
+
+    let usedNames = new Set(
+        students.map(s => s.group).filter(Boolean)
+    );
+
+    for (const name of usedNames) {
+        if (!groupIds[name]) {
+            const id = RFT.newId();
+            const row = { id, name, created_at: new Date().toISOString() };
+
+            await RFT.put("groups", row);
+            await RFT.enqueue("groups", "upsert", row);
+
+            groups.push(name);
+            groupIds[name] = id;
+
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        groups = sortGroupsPreferred(groups);
+    }
+
+    return changed;
 }
 
 /* =====================================================
@@ -271,16 +338,81 @@ async function loadAllFromLocal() {
    device sees another teacher's changes)
 ===================================================== */
 
+/* =====================================================
+   PULL FRESH DATA FROM SUPABASE INTO INDEXEDDB
+   (download direction of sync - this is how one teacher's
+   device sees another teacher's changes)
+
+   Careful about two things a naive "clear + refill" would get
+   wrong:
+   - A record with a pending (not-yet-synced) outbox change must
+     NOT be overwritten by a stale server copy - the local
+     pending version stays until it actually syncs up.
+   - A row that no longer exists on the server (someone else
+     deleted it) and has no pending local change should be
+     removed locally too, so deletions propagate correctly.
+
+   Returns true only if every table pulled successfully, so a
+   partial failure can be told apart from a full sync.
+===================================================== */
+
 async function pullAllFromSupabase() {
+    let allOk = true;
+
+    const pendingOutbox = await RFT.getPendingOutbox();
+    const pendingIdsByTable = {};
+    pendingOutbox.forEach(item => {
+        if (!item.record || !item.record.id) return;
+        if (!pendingIdsByTable[item.table]) pendingIdsByTable[item.table] = new Set();
+        pendingIdsByTable[item.table].add(item.record.id);
+    });
+
     for (const table of RFT.TABLES) {
-        const { data, error } = await supabaseClient.from(table).select("*");
+        let data, error;
+
+        try {
+            const res = await RFT.withAbortableTimeout(
+                supabaseClient.from(table).select("*"),
+                20000,
+                `Pull ${table}`
+            );
+            data = res.data;
+            error = res.error;
+        } catch (err) {
+            error = err;
+        }
+
         if (error) {
             console.error(`Could not pull ${table} from Supabase:`, error);
+            allOk = false;
             continue; // keep whatever is already cached locally for this table
         }
-        await RFT.clearStore(table);
-        await RFT.putMany(table, data || []);
+
+        const pendingIds = pendingIdsByTable[table] || new Set();
+        const serverRows = data || [];
+        const serverIds = new Set(serverRows.map(r => r.id));
+
+        // Rows still waiting to sync up keep their local version - don't
+        // let a stale server copy clobber an edit that hasn't left yet.
+        const rowsToStore = serverRows.filter(r => !pendingIds.has(r.id));
+
+        // A row that's gone from the server, and that we have no pending
+        // local change for, was deleted by someone else - remove it here too.
+        const localRows = await RFT.getAll(table);
+        for (const row of localRows) {
+            if (!pendingIds.has(row.id) && !serverIds.has(row.id)) {
+                await RFT.remove(table, row.id);
+            }
+        }
+
+        await RFT.putMany(table, rowsToStore);
     }
+
+    if (allOk) {
+        await RFT.setMeta("lastSyncedAt", Date.now());
+    }
+
+    return allOk;
 }
 
 /* =====================================================
@@ -315,6 +447,7 @@ let appEventsBound = false;
 async function initApp() {
     await RFT.openDB();
     await loadAllFromLocal();
+    await reconcileOrphanGroups();
     renderAll();
 
     if (!appEventsBound) {
@@ -330,28 +463,66 @@ async function initApp() {
     }
 }
 
+let lastSyncFailed = false;
+
 async function syncNow() {
-    if (!navigator.onLine) return;
-    updateSyncBadge("Syncing...");
+    if (!navigator.onLine) {
+        updateSyncBadge();
+        return;
+    }
+
+    updateSyncBadge("🔄 Syncing...");
+
+    let ok = true;
+
     try {
-        await RFT.processOutbox(supabaseClient);
-        await pullAllFromSupabase();
+        const pushResult = await RFT.processOutbox(supabaseClient);
+
+        if (pushResult && pushResult.reason === "already-syncing") {
+            // Another sync is already in flight - let it finish and
+            // reflect its outcome instead of racing it.
+            updateSyncBadge();
+            return;
+        }
+
+        if (pushResult && pushResult.failed > 0) ok = false;
+
+        const pullOk = await pullAllFromSupabase();
+        if (!pullOk) ok = false;
+
         await loadAllFromLocal();
+        await reconcileOrphanGroups();
         renderAll();
     } catch (err) {
         console.error("Sync failed:", err);
+        ok = false;
     }
+
+    lastSyncFailed = !ok;
     updateSyncBadge();
 }
 
 async function updateSyncBadge(overrideText) {
     const el = document.getElementById("syncBadge");
     if (!el) return;
+
     if (overrideText) {
         el.textContent = overrideText;
         return;
     }
+
     const pending = await RFT.outboxCount();
+
+    if (!navigator.onLine) {
+        el.textContent = pending > 0 ? ("📴 Offline — " + pending + " pending") : "📴 Offline";
+        return;
+    }
+
+    if (lastSyncFailed) {
+        el.textContent = "⚠️ Sync failed — will retry" + (pending > 0 ? (" (" + pending + " pending)") : "");
+        return;
+    }
+
     el.textContent = pending > 0 ? ("⏳ " + pending + " change(s) waiting to sync") : "✅ All changes synced";
 }
 
@@ -685,6 +856,63 @@ function renderManageGroups(){
     });
 
 }
+/* =====================================================
+   FLOATING MENU POSITIONING (viewport-aware)
+
+   The student/fee/group/exam "..." menus were plain
+   position:absolute dropdowns anchored to their button. Near
+   the bottom of a long list that meant the menu could open
+   off-screen, get clipped by a scrolling/overflow container,
+   or end up behind other elements - the button looked broken.
+   This computes a fixed, viewport-relative position from the
+   button's actual on-screen location every time a menu opens,
+   and flips it upward if there isn't room below. position:fixed
+   is used (rather than moving the element in the DOM) so it is
+   never clipped by an ancestor's overflow, since nothing in this
+   app's layout puts a transform/filter on any ancestor of these
+   menus - if that ever changes, this positioning would need the
+   menu re-parented to <body> instead.
+===================================================== */
+
+function positionFloatingMenu(button, menu){
+
+    let rect = button.getBoundingClientRect();
+
+    // Measure it invisibly first (needs to be display:block to have a size).
+    menu.style.visibility = "hidden";
+    menu.style.display = "block";
+
+    let menuWidth = menu.offsetWidth || 180;
+    let menuHeight = menu.offsetHeight || 120;
+
+    menu.style.display = "";
+    menu.style.visibility = "";
+
+    let margin = 8;
+
+    let spaceBelow = window.innerHeight - rect.bottom;
+    let spaceAbove = rect.top;
+
+    let top;
+    if(spaceBelow >= menuHeight + margin || spaceBelow >= spaceAbove){
+        top = rect.bottom + 6;          // enough room below (or more room than above) - open downward
+    } else {
+        top = rect.top - menuHeight - 6; // not enough room below - open upward instead
+    }
+
+    // Always keep it fully inside the viewport, even in a very short window.
+    top = Math.max(margin, Math.min(top, window.innerHeight - menuHeight - margin));
+
+    let left = rect.right - menuWidth;
+    left = Math.max(margin, Math.min(left, window.innerWidth - menuWidth - margin));
+
+    menu.style.position = "fixed";
+    menu.style.top = top + "px";
+    menu.style.left = left + "px";
+    menu.style.right = "auto";
+}
+
+
 function toggleGroupMenu(button){
 
     let menu =
@@ -692,6 +920,8 @@ function toggleGroupMenu(button){
         .querySelector(
             ".group-menu-dropdown"
         );
+
+    let willOpen = !menu.classList.contains("show");
 
     document
         .querySelectorAll(
@@ -707,6 +937,7 @@ function toggleGroupMenu(button){
 
         });
 
+    if(willOpen) positionFloatingMenu(button, menu);
     menu.classList.toggle("show");
 
 }
@@ -767,6 +998,7 @@ async function addGroup() {
     await RFT.enqueue("groups", "upsert", row);
 
     groups.push(name);
+    groups = sortGroupsPreferred(groups);
     groupIds[name] = id;
 
     studentGroup = name;
@@ -812,7 +1044,7 @@ async function editGroup(groupId) {
         return;
     }
 
-    const groupRow = { id: groupId, name: newName };
+    const groupRow = { id: groupId, name: newName, updated_at: new Date().toISOString() };
     await RFT.put("groups", groupRow);
     await RFT.enqueue("groups", "upsert", groupRow);
 
@@ -831,6 +1063,7 @@ async function editGroup(groupId) {
     if (index !== -1) {
         groups[index] = newName;
     }
+    groups = sortGroupsPreferred(groups);
 
     delete groupIds[oldName];
     groupIds[newName] = groupId;
@@ -1410,7 +1643,7 @@ function studentPhotoHTML(
 
         return `
 <img
-src="${student.photo}"
+src="${escapeHTML(student.photo)}"
 class="${className}"
 alt="${escapeHTML(student.name)}">
 `;
@@ -1486,18 +1719,7 @@ function renderStudents(){
     if(list.length === 0){
 
         table.innerHTML = `
-
-<tr>
-
-<td colspan="6"
-class="empty">
-
-No students found.
-
-</td>
-
-</tr>
-
+<div class="empty">No students found.</div>
 `;
 
         return;
@@ -1508,25 +1730,13 @@ No students found.
 
         table.innerHTML += `
 
-<tr>
+<div class="student-list-card">
 
-<td>
+<div class="student-list-card-top">
 
 ${studentPhotoHTML(s)}
 
-<b>${escapeHTML(s.name)}</b>
-
-</td>
-
-<td>${escapeHTML(s.className)}</td>
-
-<td>${escapeHTML(s.roll)}</td>
-
-<td>${escapeHTML(s.parent || "")}</td>
-
-<td>${escapeHTML(s.phone || "")}</td>
-
-<td>
+<strong class="student-list-name">${escapeHTML(s.name)}</strong>
 
 <div class="student-menu">
 
@@ -1555,9 +1765,19 @@ onclick="deleteStudent('${s.id}')">
 
 </div>
 
-</td>
+</div>
 
-</tr>
+<div class="recent-student-meta">
+<span>Class ${escapeHTML(s.className)}</span>
+<span>Roll ${escapeHTML(s.roll)}</span>
+<span>Group ${escapeHTML(s.group)}</span>
+</div>
+
+<div class="recent-student-contact">
+👨‍👩‍👦 ${escapeHTML(s.parent || "N/A")} | 📞 ${phoneLinkHTML(s.phone, "N/A")}
+</div>
+
+</div>
 
 `;
 
@@ -1800,7 +2020,7 @@ async function toggleAttendance(studentId, date) {
 
     attendance[date][studentId] = newStatus;
 
-    const row = { id, student_id: studentId, date, status: newStatus };
+    const row = { id, student_id: studentId, date, status: newStatus, updated_at: new Date().toISOString() };
 
     // 1. Local-first: write to IndexedDB + in-memory immediately - works offline.
     await RFT.put("attendance", row);
@@ -2043,6 +2263,13 @@ function renderFees(){
 
     table.innerHTML = "";
 
+    let search =
+        (document.getElementById("feeHistorySearch")?.value || "")
+        .trim()
+        .toLowerCase();
+
+    let visibleCount = 0;
+
     fees
     .slice()
     .reverse()
@@ -2056,27 +2283,20 @@ function renderFees(){
         if(!student)
             return;
 
+        if(search && !String(student.name || "").toLowerCase().includes(search))
+            return;
+
+        visibleCount++;
+
         table.innerHTML += `
 
-<tr>
+<div class="student-list-card">
 
-<td>
+<div class="student-list-card-top">
 
 ${studentPhotoHTML(student)}
 
-${escapeHTML(student.name)}
-
-</td>
-
-<td>${f.month}</td>
-
-<td>Rs. ${f.amount}</td>
-
-<td class="paid">
-PAID
-</td>
-
-<td>
+<strong class="student-list-name">${escapeHTML(student.name)}</strong>
 
 <div class="fee-menu">
 
@@ -2105,13 +2325,23 @@ onclick="deleteFee('${f.id}')">
 
 </div>
 
-</td>
+</div>
 
-</tr>
+<div class="recent-student-meta">
+<span>${escapeHTML(f.month)}</span>
+<span>Rs. ${f.amount}</span>
+<span class="paid">PAID</span>
+</div>
+
+</div>
 
 `;
 
     });
+
+    if (visibleCount === 0) {
+        table.innerHTML = `<div class="empty">${search ? "No matching student found." : "No fee records yet."}</div>`;
+    }
 
 }
 /* =====================================================
@@ -2162,7 +2392,7 @@ function searchFeeStudents() {
         item.className = "fee-student-result";
 
         let photoHTML = student.photo
-            ? `<img src="${student.photo}" alt="${escapeHTML(student.name)}">`
+            ? `<img src="${escapeHTML(student.photo)}" alt="${escapeHTML(student.name)}">`
             : `<div class="fee-student-avatar">👤</div>`;
 
         item.innerHTML = `
@@ -2304,6 +2534,11 @@ function renderExamSelect(){
             "examSelect"
         );
 
+    // Remember what was selected so a rename/list-rebuild doesn't silently
+    // jump the view back to the first exam (which made an edited exam's
+    // marks look like they'd vanished, when they were only ever hidden
+    // behind a different exam now showing instead).
+    let previousValue = select.value;
 
     select.innerHTML = "";
 
@@ -2339,6 +2574,9 @@ ${escapeHTML(exam.name)} - ${exam.date}
 
     });
 
+    if (previousValue && exams.some(e => e.id === previousValue)) {
+        select.value = previousValue;
+    }
 }
 
 
@@ -2538,19 +2776,12 @@ No students found.
 
         list.forEach(s => {
 
-            if(!results[examId][s.id]){
-
-                results[examId][s.id] = {
-                    english: 0,
-                    nepali: 0,
-                    math: 0,
-                    science: 0
-                };
-
-            }
-
+            // Read-only default for display - does NOT touch the shared
+            // results object. Writing a placeholder here (without an id)
+            // used to get "adopted" as if it were a real saved mark the
+            // moment you typed one, permanently breaking that save.
             let r =
-                results[examId][s.id];
+                results[examId][s.id] || { english: 0, nepali: 0, math: 0, science: 0 };
 
             let total =
                 Number(r.english || 0) +
@@ -2649,19 +2880,11 @@ No students found.
 
     list.forEach(s => {
 
-        if(!results[examId][s.id]){
-
-            results[examId][s.id] = {
-                english: 0,
-                nepali: 0,
-                math: 0,
-                science: 0
-            };
-
-        }
-
+        // Read-only default for display - does NOT touch the shared
+        // results object (see the other occurrence of this pattern above
+        // for why that mattered).
         let r =
-            results[examId][s.id];
+            results[examId][s.id] || { english: 0, nepali: 0, math: 0, science: 0 };
 
         let total =
             Number(r.english || 0) +
@@ -2823,19 +3046,12 @@ function renderResultStudentDetail(
         return;
     }
 
-    if(!results[examId][studentId]){
-
-        results[examId][studentId] = {
-            english: 0,
-            nepali: 0,
-            math: 0,
-            science: 0
-        };
-
-    }
-
+    // Read-only default for display - does NOT touch the shared results
+    // object (a placeholder without a proper id here used to get
+    // "adopted" as the real saved record the moment a mark was typed,
+    // and IndexedDB then permanently refused to save it).
     let r =
-        results[examId][studentId];
+        results[examId][studentId] || { english: 0, nepali: 0, math: 0, science: 0 };
 
     let total =
         Number(r.english || 0) +
@@ -3106,13 +3322,18 @@ async function updateMark(
 
     if(!results[examId]) results[examId] = {};
 
-    if(!results[examId][studentId]){
+    // If this entry doesn't exist yet, OR exists but is somehow missing
+    // its id (e.g. a leftover corrupted entry from a previous bug), give
+    // it a fresh id now rather than silently reusing a broken one forever.
+    if(!results[examId][studentId] || !results[examId][studentId].id){
         results[examId][studentId] = {
+            ...(results[examId][studentId] || {}),
             id: RFT.newId(),
-            english: 0,
-            nepali: 0,
-            math: 0,
-            science: 0
+            english: (results[examId][studentId] || {}).english || 0,
+            nepali: (results[examId][studentId] || {}).nepali || 0,
+            math: (results[examId][studentId] || {}).math || 0,
+            science: (results[examId][studentId] || {}).science || 0,
+            createdAt: new Date().toISOString()
         };
     }
 
@@ -3136,8 +3357,10 @@ async function updateMark(
         nepali: Number(result.nepali || 0),
         maths: Number(result.math || 0),
         science: Number(result.science || 0),
-        total: total
+        total: total,
+        updated_at: new Date().toISOString()
     };
+    if (result.createdAt) row.created_at = result.createdAt;
 
     // Local-first: write + queue, no live "does it exist yet" round trip
     // needed - the id is known client-side so upsert always does the
@@ -3393,7 +3616,7 @@ Start typing to search students.
             photoHTML = `
 
 <img
-src="${student.photo}"
+src="${escapeHTML(student.photo)}"
 alt="${escapeHTML(student.name)}">
 
 `;
@@ -3593,10 +3816,10 @@ function renderStudentHistory() {
         .forEach(f => {
             feeRows += `
                 <tr>
-                    <td>${f.month}</td>
+                    <td>${escapeHTML(f.month)}</td>
                     <td>Rs. ${f.amount}</td>
                     <td class="paid">Paid</td>
-                    <td>${f.paidDate}</td>
+                    <td>${escapeHTML(f.paidDate)}</td>
                 </tr>
             `;
         });
@@ -3674,7 +3897,7 @@ function renderStudentHistory() {
                         <span>Group ${escapeHTML(student.group)}</span>
                     </div>
                     <div class="recent-student-contact">
-                        👨‍👩‍👦 ${escapeHTML(student.parent || "Not provided")} &nbsp;•&nbsp; 📞 ${escapeHTML(student.phone || "Not provided")}
+                        👨‍👩‍👦 ${escapeHTML(student.parent || "Not provided")} &nbsp;•&nbsp; 📞 ${phoneLinkHTML(student.phone)}
                     </div>
                     <div class="recent-student-contact">
                         🗓️ Joined ${escapeHTML(student.joined || "Not available")}
@@ -3737,6 +3960,7 @@ function renderStudentHistory() {
 
         <div class="panel">
             <h3>💰 Fee History</h3>
+            <div class="table-scroll">
             <table>
                 <thead>
                     <tr><th>Month</th><th>Amount</th><th>Status</th><th>Paid Date</th></tr>
@@ -3745,10 +3969,12 @@ function renderStudentHistory() {
                     ${feeRows || `<tr><td colspan="4" class="empty">No fee records.</td></tr>`}
                 </tbody>
             </table>
+            </div>
         </div>
 
         <div class="panel">
             <h3>📝 Exam History</h3>
+            <div class="table-scroll">
             <table>
                 <thead>
                     <tr>
@@ -3764,6 +3990,7 @@ function renderStudentHistory() {
                     ${examRows || `<tr><td colspan="6" class="empty">No exams found.</td></tr>`}
                 </tbody>
             </table>
+            </div>
         </div>
     `;
 }
@@ -3786,14 +4013,28 @@ function renderDashboard(){
 
     document.getElementById("totalStudents").innerText = students.length;
 
-    /* Dynamic group cards */
-    let groupACount = students.filter(s => s.group === "A").length;
-    let groupBCount = students.filter(s => s.group === "B").length;
-    let groupCCount = students.filter(s => s.group === "C").length;
+    /* Group cards - one per actual group, A/B/C first if present, then
+       whichever other groups exist, so this keeps working no matter how
+       many groups get added later. */
+    let groupStatContainer = document.getElementById("dashboardGroupStats");
+    if (groupStatContainer) {
+        let orderedNames = groups;
 
-    document.getElementById("groupA").innerText = groupACount;
-    document.getElementById("groupB").innerText = groupBCount;
-    document.getElementById("groupC").innerText = groupCCount;
+        groupStatContainer.innerHTML = orderedNames.map(name => {
+            let count = students.filter(s => s.group === name).length;
+            return `
+<div class="group-stat-card">
+    <div class="group-stat-icon">${escapeHTML(name)}</div>
+    <div class="group-stat-info">
+        <span>GROUP ${escapeHTML(name.toUpperCase())}</span>
+        <strong>${count}</strong>
+        <small>Students</small>
+    </div>
+    <div class="group-stat-decoration">${escapeHTML(name)}</div>
+</div>
+`;
+        }).join("");
+    }
 
     /* Today's attendance */
     let date = today();
@@ -3874,7 +4115,7 @@ function renderDashboard(){
                         <span>Group ${escapeHTML(s.group)}</span>
                     </div>
                     <div class="recent-student-contact">
-                        👨‍👩‍👦 ${escapeHTML(s.parent || "N/A")} | 📞 ${escapeHTML(s.phone || "N/A")}
+                        👨‍👩‍👦 ${escapeHTML(s.parent || "N/A")} | 📞 ${phoneLinkHTML(s.phone, "N/A")}
                     </div>
                 </div>
             </div>
@@ -4362,6 +4603,37 @@ function escapeHTML(value){
 
 
 /* =====================================================
+   PHONE -> tel: LINK (safe)
+
+   Renders the phone number as tappable text that opens the
+   Android dialer. Two layers of safety: the visible text goes
+   through escapeHTML like anywhere else user input is shown,
+   and the tel: URI itself is built from a separately-sanitized
+   copy that only ever contains digits/+/-/spaces/parentheses,
+   so nothing in the field can break out of the href attribute
+   or turn into some other URI scheme.
+===================================================== */
+
+function phoneLinkHTML(phone, fallbackText){
+
+    let raw = String(phone ?? "").trim();
+
+    if(!raw){
+        return escapeHTML(fallbackText ?? "Not provided");
+    }
+
+    let safeTel = raw.replace(/[^\d+\-\s()]/g, "");
+
+    if(!safeTel){
+        return escapeHTML(raw);
+    }
+
+    return `<a href="tel:${escapeHTML(safeTel)}" class="phone-link">${escapeHTML(raw)}</a>`;
+
+}
+
+
+/* =====================================================
    RENDER EVERYTHING
 ===================================================== */
 
@@ -4457,6 +4729,8 @@ function toggleExamMenu(button){
             ".exam-menu-dropdown"
         );
 
+    let willOpen = !menu.classList.contains("show");
+
     document
         .querySelectorAll(
             ".exam-menu-dropdown"
@@ -4471,6 +4745,7 @@ function toggleExamMenu(button){
 
         });
 
+    if(willOpen) positionFloatingMenu(button, menu);
     menu.classList.toggle("show");
 
 }
@@ -4617,6 +4892,8 @@ function toggleStudentMenu(button){
             ".student-menu-dropdown"
         );
 
+    let willOpen = !menu.classList.contains("show");
+
     document
         .querySelectorAll(
             ".student-menu-dropdown"
@@ -4631,6 +4908,7 @@ function toggleStudentMenu(button){
 
         });
 
+    if(willOpen) positionFloatingMenu(button, menu);
     menu.classList.toggle("show");
 
 }
@@ -4668,6 +4946,8 @@ function toggleFeeMenu(button){
             ".fee-menu-dropdown"
         );
 
+    let willOpen = !menu.classList.contains("show");
+
     document
         .querySelectorAll(
             ".fee-menu-dropdown"
@@ -4682,6 +4962,7 @@ function toggleFeeMenu(button){
 
         });
 
+    if(willOpen) positionFloatingMenu(button, menu);
     menu.classList.toggle("show");
 
 }
@@ -4726,7 +5007,8 @@ async function editFee(id){
     if(!newMonth){
         alert("Month cannot be empty.");
         return;
- }
+    }
+
     let newAmount = prompt("Enter fee amount:", fee.amount);
     if(newAmount === null) return;
     newAmount = newAmount.trim();
@@ -4734,6 +5016,7 @@ async function editFee(id){
         alert("Amount cannot be empty.");
         return;
     }
+
     let amount = Number(newAmount);
     if(!Number.isFinite(amount) || amount < 0){
         alert("Please enter a valid amount.");
@@ -4759,9 +5042,12 @@ window.addEventListener("load", function(){
 
         const splash =
             document.getElementById("appSplash");
+
         if(splash){
             splash.remove();
         }
+
     }, 2100);
+
 });
 // (offline database v1 removed - offline-core.js + initApp()/syncNow() at the top of this file now own this)
