@@ -170,8 +170,99 @@
        OUTBOX (sync queue)
        ===================================================== */
 
+    /* =====================================================
+       TIMEOUT HELPER
+       A network request with no timeout can hang forever on a
+       flaky mobile connection, leaving the UI stuck on
+       "Syncing...". Every Supabase call this file/script.js
+       makes is wrapped in this so it always settles one way or
+       another within a bounded time.
+       ===================================================== */
+
+    function withTimeout(promise, ms, label) {
+        let timeoutId;
+        const timeout = new Promise((_, reject) => {
+            timeoutId = setTimeout(
+                () => reject(new Error((label || "Request") + " timed out")),
+                ms
+            );
+        });
+        return Promise.race([Promise.resolve(promise), timeout])
+            .finally(() => clearTimeout(timeoutId));
+    }
+
+    /* =====================================================
+       ABORTABLE TIMEOUT
+       Same idea as withTimeout, but also actually cancels the
+       underlying network request via AbortController (rather
+       than just walking away from an abandoned promise), which
+       frees up the connection instead of leaving it hanging in
+       the background. Falls back to a plain race if the query
+       builder passed in doesn't support .abortSignal() for
+       whatever reason - still correct, just without true
+       cancellation.
+       ===================================================== */
+
+    function withAbortableTimeout(queryBuilder, ms, label) {
+        let controller = null;
+        let timeoutId;
+
+        let promise = queryBuilder;
+        if (queryBuilder && typeof queryBuilder.abortSignal === "function") {
+            controller = new AbortController();
+            promise = queryBuilder.abortSignal(controller.signal);
+        }
+
+        timeoutId = setTimeout(() => {
+            if (controller) controller.abort();
+        }, ms);
+
+        // A small buffer beyond the abort itself, in case aborting doesn't
+        // actually settle the promise in some environment - this still
+        // guarantees the caller's await always resolves/rejects.
+        return withTimeout(promise, ms + 3000, label)
+            .finally(() => clearTimeout(timeoutId));
+    }
+
+    /* =====================================================
+       OUTBOX (sync queue)
+
+       Coalesces repeated edits to the same record into a single
+       queued item instead of piling up one entry per keystroke/
+       save - so editing a student's phone number five times
+       before you're back online still only sends one upsert.
+       ===================================================== */
+
     async function enqueue(table, action, record) {
         const db = await openDB();
+
+        // Look for an existing pending item for this exact record so we
+        // can coalesce instead of appending a duplicate.
+        const existing = (await getPendingOutbox())
+            .filter(i => i.table === table && i.record && record && i.record.id === record.id);
+
+        if (action === "upsert") {
+            const existingUpsert = existing.find(i => i.action === "upsert");
+            if (existingUpsert) {
+                // Same record, still queued, not yet synced - just replace
+                // the payload with the latest version rather than queuing
+                // another full round trip for it.
+                await updateOutboxItem(existingUpsert.localId, {
+                    record,
+                    lastError: null
+                });
+                return existingUpsert.localId;
+            }
+        }
+
+        if (action === "delete") {
+            // Nothing to upsert if it's about to be deleted anyway - and
+            // no need to delete twice.
+            for (const item of existing) {
+                await removeFromOutbox(item.localId);
+            }
+        }
+
         return new Promise((resolve, reject) => {
             const tx = db.transaction("outbox", "readwrite");
             const store = tx.objectStore("outbox");
@@ -257,15 +348,18 @@
                     let error = null;
 
                     if (item.action === "upsert") {
-                        const res = await supabaseClient
-                            .from(item.table)
-                            .upsert(item.record);
+                        const res = await withAbortableTimeout(
+                            supabaseClient.from(item.table).upsert(item.record),
+                            20000,
+                            "Upsert"
+                        );
                         error = res.error;
                     } else if (item.action === "delete") {
-                        const res = await supabaseClient
-                            .from(item.table)
-                            .delete()
-                            .eq("id", item.record.id);
+                        const res = await withAbortableTimeout(
+                            supabaseClient.from(item.table).delete().eq("id", item.record.id),
+                            20000,
+                            "Delete"
+                        );
                         error = res.error;
                     } else {
                         // Unknown action - drop it rather than loop on it forever.
@@ -398,7 +492,9 @@
         fullSync,
         newId,
         requestPersistentStorage,
-        getDatabaseInfo
+        getDatabaseInfo,
+        withTimeout,
+        withAbortableTimeout
     };
 
     openDB()
