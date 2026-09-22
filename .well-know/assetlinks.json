@@ -1,8 +1,0 @@
-[{
-      "relation": ["delegate_permission/common.handle_all_urls"],
-      "target": {
-        "namespace": "android_app",
-        "package_name": "io.github.suraz7194_debug.twa",
-        "sha256_cert_fingerprints": ["E4:44:14:3D:8C:AB:AA:97:39:14:63:DC:AF:55:35:C1:23:8B:CA:2C:74:74:3B:D4:17:1E:5E:DF:7C:C7:00:39"]
-      }
-    }]
