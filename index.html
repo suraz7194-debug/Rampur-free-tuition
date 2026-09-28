@@ -11,6 +11,7 @@
 <title>Rampur Free Tuition Center</title>
   
 
+
 <link rel="stylesheet" href="style.css">
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -256,6 +257,31 @@ onclick="runAbsenceEngineDryTest()">
 </button>
 
 <p class="small" id="absenceEngineTestStatus" style="margin-top:8px; white-space:pre-line;">Not tested yet</p>
+
+</div>
+
+
+<!-- =========================
+     TEMPORARY (Stage 7C): OWNER-ONLY ABSENCE PUSH TEST
+     Hidden by default; shown only by applyOwnerVisibility().
+     Sends ONE labelled TEST notification to the Owner's own devices.
+     Remove together with runAbsencePushTest() in script.js.
+========================= -->
+
+<div class="panel" id="absencePushTestPanel" style="display:none;">
+
+<h3>🧪 Absence Push Test (temporary, owner only)</h3>
+
+<p class="small">Sends one clearly-labelled TEST attendance alert to your own devices only. No real student or alert is involved.</p>
+
+<button
+class="btn"
+id="absencePushTestButton"
+onclick="runAbsencePushTest()">
+🔔 Send Test Absence Push
+</button>
+
+<p class="small" id="absencePushTestStatus" style="margin-top:8px; white-space:pre-line;">Not tested yet</p>
 
 </div>
 
@@ -1717,4 +1743,4 @@ if ("serviceWorker" in navigator) {
   </script>
   
 </body>
-              </html>
+  </html>
