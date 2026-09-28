@@ -166,6 +166,11 @@ function applyOwnerVisibility() {
     // the HTML by default; only ever shown here. Remove with the panel.
     let pushTestPanel = document.getElementById("pushTestPanel");
     if (pushTestPanel) pushTestPanel.style.display = owner ? "" : "none";
+
+    // TEMPORARY (Stage 7B-test): owner-only Absence Alert Engine dry-run panel.
+    // Hidden in the HTML by default; only ever shown here. Remove with the panel.
+    let absenceEngineTestPanel = document.getElementById("absenceEngineTestPanel");
+    if (absenceEngineTestPanel) absenceEngineTestPanel.style.display = owner ? "" : "none";
 }
 
 /* =====================================================
@@ -487,6 +492,94 @@ async function sendTestPush() {
     } finally {
         pushTestInFlight = false;
         if (button) button.disabled = false;
+    }
+}
+
+/* =====================================================
+   TEMPORARY (Stage 7B-test) - OWNER-ONLY "RUN DRY TEST" HANDLER
+   Invokes the already-deployed "absence-alert-engine" Edge Function in
+   DRY-RUN mode using the existing authenticated Supabase session.
+
+   Contract (verified against the deployed function): POST with a JSON body;
+   the function only writes when the body has apply === true. This handler
+   ALWAYS sends { apply: false } and never sends apply: true. It also refuses
+   to show a result as OK unless the function itself reports dryRun === true.
+
+   Displays only an allow-listed set of numbers/labels from the response -
+   never the raw response, headers or tokens. Remove this function,
+   absenceEngineTestPanel in index.html, and the one block in
+   applyOwnerVisibility() when testing is finished.
+===================================================== */
+let absenceEngineTestInFlight = false;
+
+async function runAbsenceEngineDryTest() {
+    if (!isOwner()) return;                     // defensive: UI is already hidden for non-owners
+    if (absenceEngineTestInFlight) return;      // prevent duplicate simultaneous requests
+
+    const button = document.getElementById("absenceEngineTestButton");
+    const status = document.getElementById("absenceEngineTestStatus");
+    const setStatus = text => { if (status) status.textContent = text; };
+    const num = v => (typeof v === "number" && isFinite(v)) ? String(v) : "?";
+
+    if (!navigator.onLine) {
+        setStatus("Absence engine test failed: this device is offline.");
+        return;
+    }
+
+    absenceEngineTestInFlight = true;
+    if (button) { button.disabled = true; button.textContent = "⏳ Running..."; }
+    setStatus("Running dry test...");
+
+    try {
+        const { data, error } = await supabaseClient.functions.invoke("absence-alert-engine", {
+            body: { apply: false }              // explicit DRY RUN - never true from this UI
+        });
+
+        if (error) {
+            // Non-2xx: the function's JSON body carries a safe plain-language message.
+            let message = "request failed.";
+            try {
+                if (error.context && typeof error.context.json === "function") {
+                    const body = await error.context.json();
+                    if (body && typeof body.error === "string") message = body.error;
+                }
+            } catch (_) { /* body unreadable - keep generic message */ }
+            setStatus("Absence engine test failed: " + message);
+        } else if (!data || data.ok !== true) {
+            setStatus("Absence engine test failed: unexpected response.");
+        } else if (data.dryRun !== true) {
+            // Must never happen from this UI; refuse to present it as a dry-run result.
+            setStatus("⚠ The function did not report dry-run mode. Do not rely on this result - check the database.");
+        } else {
+            const planned = data.planned || {};
+            const applied = data.applied || {};
+            const lines = [
+                "✅ Dry run completed (dry-run mode confirmed by the function).",
+                "Students evaluated: " + num(data.studentsEvaluated),
+                "Attendance rows read: " + num(data.attendanceRowsRead),
+                "Open alerts read: " + num(data.openAlertsRead),
+                "Would create: " + num(planned.create) +
+                    " · Would update: " + num(planned.update) +
+                    " · Would resolve: " + num(planned.resolve),
+                "No change needed: " + num(data.unchanged),
+                "Applied (must be 0 in a dry run): create " + num(applied.create) +
+                    ", update " + num(applied.update) + ", resolve " + num(applied.resolve)
+            ];
+            const actions = Array.isArray(data.actions) ? data.actions.slice(0, 5) : [];
+            actions.forEach(a => {
+                const type = ["create", "update", "resolve"].includes(a && a.type) ? a.type : "?";
+                const sid = (a && typeof a.student_id === "string") ? a.student_id.slice(0, 8) : "?";
+                lines.push("  • would " + type + " — student " + sid + "…" +
+                    (typeof a.absent_count === "number" ? " (" + a.absent_count + " absences)" : ""));
+            });
+            setStatus(lines.join("\n"));
+        }
+    } catch (err) {
+        console.warn("Absence engine dry test failed:", err);
+        setStatus("Absence engine test failed: could not reach the server.");
+    } finally {
+        absenceEngineTestInFlight = false;
+        if (button) { button.disabled = false; button.textContent = "▶ Run Dry Test"; }
     }
 }
 
