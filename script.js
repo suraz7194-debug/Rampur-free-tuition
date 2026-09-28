@@ -16,6 +16,419 @@ const supabaseClient = supabase.createClient(
 
 
 /* =====================================================
+   OWNER / TEACHER DETECTION (Finance access control)
+
+   This is a UI/behavior convenience layer ONLY - it decides what
+   THIS DEVICE shows and attempts (nav button, Finance section,
+   Finance add/edit/delete, what gets pulled/pushed). It is NOT the
+   real security boundary: Supabase Row Level Security on the
+   "finance" table (using public.is_owner()) is, and stays, the
+   authoritative layer. Even if this client-side check were wrong,
+   tampered with, or bypassed entirely, a non-owner's actual
+   Supabase requests still have to pass RLS to succeed or return
+   data.
+
+   Ownership is determined by a ROLE LOOKUP against the
+   public.user_roles table (role = 'owner' or 'teacher'), not by
+   comparing the signed-in user's id to any single hardcoded UID.
+   This matches the database, which supports multiple simultaneous
+   owners (the current seeded owner, and later a second owner
+   account) via that same table - there is no "the one owner UID"
+   concept on either side anymore.
+
+   currentUserId/currentUserRole are populated from the real
+   Supabase Auth session (signInWithPassword's response, or
+   getSession()) and a live query against user_roles - never
+   invented, never assumed. rftUserId/rftUserRole in localStorage
+   are only a cache of those same values so the UI can restore its
+   owner/teacher state instantly, including offline (see
+   cacheUserId/cacheUserRole below) - neither is itself checked by
+   anything on the server.
+===================================================== */
+
+let currentUserId = null;
+let currentUserRole = null; // 'owner' | 'teacher' | null (no row / unknown)
+
+function isOwner() {
+    return currentUserRole === "owner";
+}
+
+function isTeacher() {
+    return currentUserRole === "teacher";
+}
+
+function cacheUserId(id) {
+    currentUserId = id || null;
+    if (currentUserId) {
+        localStorage.setItem("rftUserId", currentUserId);
+    } else {
+        localStorage.removeItem("rftUserId");
+    }
+}
+
+function cacheUserRole(role) {
+    currentUserRole = role || null;
+    if (currentUserRole) {
+        localStorage.setItem("rftUserRole", currentUserRole);
+    } else {
+        localStorage.removeItem("rftUserRole");
+    }
+}
+
+/* Looks up the given Supabase Auth user's role from user_roles.
+   Returns "owner", "teacher", null (authenticated but no role row
+   - e.g. a not-yet-assigned future account, correctly treated as
+   no special access), or undefined if the lookup itself couldn't
+   be performed (offline, network error) - callers should keep
+   whatever role was previously cached rather than treat undefined
+   as "no role", since that would incorrectly demote someone on a
+   transient failure. RLS on user_roles ("Users can view own role")
+   already allows any authenticated user to read their own row, so
+   this works identically for owners and teachers. */
+async function fetchUserRole(userId) {
+    if (!userId) return null;
+    try {
+        const { data, error } = await supabaseClient
+            .from("user_roles")
+            .select("role")
+            .eq("user_id", userId)
+            .maybeSingle();
+        if (error) {
+            console.warn("Could not fetch user role:", error);
+            return undefined;
+        }
+        return data ? data.role : null;
+    } catch (err) {
+        console.warn("Could not fetch user role:", err);
+        return undefined;
+    }
+}
+
+/* Hides/shows the Finance nav button and Finance section based on
+   isOwner(). Called once currentUserId is known (see initApp below).
+   This is the UI half of Finance access control - see the owner
+   checks inside the Finance functions themselves (addFinance,
+   renderFinance, etc.) for the part that holds even if this UI step
+   is somehow skipped or a Finance function is called directly. */
+/* Hides/shows a nav button and, defensively, bounces the user off its
+   section back to Dashboard if it's somehow left active for someone
+   who shouldn't be there (e.g. stale UI state on a shared device).
+   Shared by Finance and Backup below - same pattern, just parameterized
+   by which button/section it applies to. */
+function applyNavVisibility(navButtonId, sectionId, allowed) {
+    let navButton = document.getElementById(navButtonId);
+    if (navButton) navButton.style.display = allowed ? "" : "none";
+
+    let section = document.getElementById(sectionId);
+    if (section && !allowed && section.classList.contains("active")) {
+        document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+        document.querySelectorAll("nav button").forEach(btn => btn.classList.remove("active"));
+
+        let dashboard = document.getElementById("dashboard");
+        if (dashboard) dashboard.classList.add("active");
+
+        let dashboardBtn = document.querySelector("nav button[onclick^=\"showSection('dashboard'\"]");
+        if (dashboardBtn) dashboardBtn.classList.add("active");
+    }
+}
+
+function applyOwnerVisibility() {
+    let owner = isOwner();
+
+    // Finance - unchanged behavior from before, just now expressed
+    // through the shared helper above.
+    applyNavVisibility("financeNavButton", "fees", owner);
+
+    // Backup/Restore (Stage 1 of the teacher permission fix) - same
+    // pattern, applied to the Backup nav button/section. The Backup
+    // section contains both Backup and Restore in one place, so hiding
+    // this one button/section covers both, matching importData()'s and
+    // exportData()'s own owner-only guards.
+    applyNavVisibility("backupNavButton", "backup", owner);
+
+    // Delete Exam button (Stage 1) - a static button, not part of a
+    // per-item render loop like the student cards, so it's toggled
+    // here rather than inline in a template.
+    let deleteExamButton = document.getElementById("deleteExamButton");
+    if (deleteExamButton) deleteExamButton.style.display = owner ? "" : "none";
+
+    // Events & Notices: Owner can add/edit/delete, Teacher can only
+    // view. Unlike Finance/Backup, the Events NAV BUTTON and SECTION
+    // stay visible to everyone - only the Add/Edit form panel is
+    // owner-only, toggled here the same way deleteExamButton is above.
+    // (The per-card edit/delete ⋮ menu is gated separately, inline in
+    // renderEvents(), since it depends on isOwner() per render, not
+    // just at login/role-refresh time.)
+    let eventFormPanel = document.getElementById("eventFormPanel");
+    if (eventFormPanel) eventFormPanel.style.display = owner ? "" : "none";
+}
+
+/* =====================================================
+   WEB PUSH NOTIFICATIONS (Stage 3 - client foundation only)
+
+   This is ONLY the client-side plumbing: request permission, create
+   a browser Push subscription, and store it in the existing
+   "notification_subscriptions" Supabase table (added in Stage 2).
+   No server-side scheduler exists yet, so nothing will actually be
+   sent as a result of this - that is a later stage. Uses the same
+   currentUserId/supabaseClient as the rest of the app; no separate
+   auth mechanism.
+
+   VAPID_PUBLIC_KEY is intentionally empty: no VAPID key pair has
+   been generated for this project yet. Only the PUBLIC half of a
+   VAPID key may ever go here - never the private key. Until a real
+   key is configured, enablePushNotifications() still requests
+   permission (so that part can be tested) but stops before calling
+   pushManager.subscribe(), since subscribing requires a valid
+   applicationServerKey.
+===================================================== */
+
+const VAPID_PUBLIC_KEY = "BO-xj4JzWHWuYfYfwRQB0mD0dUoPylT2vaoF5V-1Vxnp8yAj_Sq6I9VWgywZpHpdRIuZLCUNLCTKX3RHbQ-k_8g"; // PUBLIC key only. Private key lives in Supabase Edge Function secrets, never here.
+
+function pushNotificationsSupported() {
+    return ("Notification" in window) && ("serviceWorker" in navigator) && ("PushManager" in window);
+}
+
+// Converts a base64url VAPID public key (the format it's normally
+// generated/shared in) into the Uint8Array pushManager.subscribe() needs.
+function urlBase64ToUint8Array(base64String) {
+    const padding = "=".repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+    const rawData = atob(base64);
+    return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+}
+
+function setNotificationStatusText(text) {
+    let el = document.getElementById("notificationStatusText");
+    if (el) el.innerText = text;
+}
+
+/* Reflects the CURRENT state only (supported? permission? existing
+   subscription?) - never itself prompts for permission. Safe to call
+   on every app load/render. */
+async function refreshNotificationUI() {
+    let button = document.getElementById("notificationEnableButton");
+    if (!button) return;
+
+    if (!pushNotificationsSupported()) {
+        button.style.display = "none";
+        setNotificationStatusText("Notifications aren't supported on this browser/device.");
+        return;
+    }
+
+    button.style.display = "";
+
+    if (Notification.permission === "denied") {
+        button.disabled = true;
+        button.innerText = "🔔 Enable Notifications";
+        setNotificationStatusText("Notifications are blocked in this browser's site settings.");
+        return;
+    }
+
+    button.disabled = false;
+
+    try {
+        const registration = await navigator.serviceWorker.ready;
+        const existing = await registration.pushManager.getSubscription();
+
+        if (existing) {
+            button.innerText = "🔕 Disable Notifications";
+            button.onclick = disablePushNotifications;
+            setNotificationStatusText("Notifications are enabled on this device.");
+        } else {
+            button.innerText = "🔔 Enable Notifications";
+            button.onclick = enablePushNotifications;
+            setNotificationStatusText(
+                VAPID_PUBLIC_KEY
+                    ? "Notifications are off on this device."
+                    : "Notifications aren't fully set up yet (server key pending)."
+            );
+        }
+    } catch (err) {
+        console.warn("Could not check existing push subscription:", err);
+    }
+}
+
+/* Only ever called from the "Enable Notifications" button's onclick,
+   i.e. an explicit user action - never automatically on page load. */
+async function enablePushNotifications() {
+    if (!pushNotificationsSupported()) {
+        alert("Notifications aren't supported on this browser/device.");
+        return;
+    }
+
+    if (!currentUserId) {
+        alert("Please log in first.");
+        return;
+    }
+
+    let permission;
+    try {
+        permission = await Notification.requestPermission();
+    } catch (err) {
+        console.error("Notification permission request failed:", err);
+        setNotificationStatusText("Couldn't request notification permission.");
+        return;
+    }
+
+    if (permission !== "granted") {
+        setNotificationStatusText(
+            permission === "denied"
+                ? "Notifications are blocked in this browser's site settings."
+                : "Notification permission was not granted."
+        );
+        return;
+    }
+
+    if (!VAPID_PUBLIC_KEY) {
+        // Matches the project instruction: do not invent/store a VAPID
+        // key here. A server-side VAPID key pair (public half placed in
+        // VAPID_PUBLIC_KEY above) must exist before a real subscription
+        // can be created - see the assistant's Stage 3 report.
+        console.warn(
+            "Push subscription skipped: no VAPID public key configured yet."
+        );
+        setNotificationStatusText(
+            "Permission granted, but push isn't fully set up yet (server key pending)."
+        );
+        return;
+    }
+
+    try {
+        const registration = await navigator.serviceWorker.ready;
+
+        let subscription = await registration.pushManager.getSubscription();
+        if (!subscription) {
+            subscription = await registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+            });
+        }
+
+        await saveSubscriptionToSupabase(subscription);
+        await refreshNotificationUI();
+    } catch (err) {
+        // Covers "offline during subscribe", "permission changed mid-flow",
+        // etc. - fails gracefully, no retry loop.
+        console.error("Push subscription failed:", err);
+        setNotificationStatusText("Couldn't enable notifications right now. Try again when online.");
+    }
+}
+
+async function disablePushNotifications() {
+    try {
+        const registration = await navigator.serviceWorker.ready;
+        const subscription = await registration.pushManager.getSubscription();
+
+        if (subscription) {
+            await deactivateSubscriptionInSupabase(subscription.endpoint, currentUserId);
+            await subscription.unsubscribe();
+        }
+
+        await refreshNotificationUI();
+    } catch (err) {
+        console.error("Failed to disable notifications:", err);
+        setNotificationStatusText("Couldn't disable notifications right now.");
+    }
+}
+
+/* Upserts on "endpoint" (unique in the DB - see Stage 2), so
+   re-enabling on the same device/browser updates the existing row
+   instead of creating a duplicate. RLS (Stage 2) already restricts
+   this to rows where user_id = auth.uid(), so this can never write
+   another user's subscription. */
+async function saveSubscriptionToSupabase(subscription) {
+    const json = subscription.toJSON();
+    const row = {
+        user_id: currentUserId,
+        endpoint: json.endpoint,
+        p256dh: json.keys ? json.keys.p256dh : null,
+        auth: json.keys ? json.keys.auth : null,
+        active: true,
+        last_used_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+    };
+
+    const { error } = await supabaseClient
+        .from("notification_subscriptions")
+        .upsert(row, { onConflict: "endpoint" });
+
+    if (error) {
+        console.error("Could not save push subscription to Supabase:", error);
+        throw error;
+    }
+}
+
+/* Marks a subscription inactive rather than deleting the row, and is
+   scoped to both endpoint AND the given user id - RLS enforces the
+   same restriction server-side regardless. */
+async function deactivateSubscriptionInSupabase(endpoint, userId) {
+    if (!endpoint || !userId) return;
+
+    try {
+        const { error } = await supabaseClient
+            .from("notification_subscriptions")
+            .update({ active: false, updated_at: new Date().toISOString() })
+            .eq("endpoint", endpoint)
+            .eq("user_id", userId);
+
+        if (error) console.warn("Could not deactivate push subscription in Supabase:", error);
+    } catch (err) {
+        // Offline/network failure - best effort only, no retry loop.
+        console.warn("Could not deactivate push subscription (offline?):", err);
+    }
+}
+
+/* Best-effort, fire-and-forget: deactivates THIS device's subscription
+   row for the user who is logging out, without unsubscribing the
+   browser itself (so re-enabling after logging back in is instant).
+   Never blocks logout and never throws. */
+async function deactivateCurrentDeviceSubscriptionOnLogout(userId) {
+    if (!userId || !("serviceWorker" in navigator)) return;
+    try {
+        const registration = await navigator.serviceWorker.getRegistration();
+        if (!registration) return;
+        const subscription = await registration.pushManager.getSubscription();
+        if (subscription) {
+            await deactivateSubscriptionInSupabase(subscription.endpoint, userId);
+        }
+    } catch (err) {
+        console.warn("Could not deactivate push subscription on logout:", err);
+    }
+}
+
+/* ---------- LOCAL TEST NOTIFICATION (dev/testing only) ----------
+   Shows a notification through the service worker WITHOUT sending a
+   real Web Push message, and without writing anything to
+   notification_logs/absence_alerts/events. This only proves that
+   showNotification() and the service-worker registration work on
+   THIS device - it is NOT a test of server-side delivery, and it is
+   not wired to any button (console-only, so it can't clutter the
+   production UI and is easy to remove later).
+
+   Run from the browser console after granting permission:
+     testLocalNotification()
+===================================================== */
+async function testLocalNotification() {
+    if (!pushNotificationsSupported()) {
+        console.warn("Notifications aren't supported on this browser/device.");
+        return;
+    }
+    if (Notification.permission !== "granted") {
+        console.warn("Grant notification permission first, then re-run testLocalNotification().");
+        return;
+    }
+    const registration = await navigator.serviceWorker.ready;
+    await registration.showNotification("🔔 Local test (not a real push)", {
+        body: "This is a local service-worker test notification only - no server involved.",
+        icon: "./icons/icon-192.png",
+        badge: "./icons/icon-192.png",
+        data: { url: "./" }
+    });
+}
+
+
+/* =====================================================
    ADMIN LOGIN & SESSION (OFFLINE READY)
 
    Online: Supabase auth is the source of truth.
@@ -46,10 +459,16 @@ async function adminLogin() {
 
     if (navigator.onLine) {
         try {
-            const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+            const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
             if (error) throw error;
 
             localStorage.setItem("adminLoggedIn", "true");
+            const uid = data && data.user ? data.user.id : null;
+            cacheUserId(uid);
+
+            const role = await fetchUserRole(uid);
+            cacheUserRole(role === undefined ? null : role);
+
             if (message) message.innerText = "";
             document.getElementById("loginScreen").style.display = "none";
             await initApp();
@@ -63,6 +482,12 @@ async function adminLogin() {
 
     // Offline: only allow re-entry if this device has logged in successfully before.
     if (localStorage.getItem("adminLoggedIn") === "true") {
+        // Restore the cached user id and role from the last successful
+        // online login on this device - see cacheUserId()/cacheUserRole()'s
+        // doc comments for why this is safe to trust for UI purposes
+        // while offline.
+        currentUserId = localStorage.getItem("rftUserId") || null;
+        currentUserRole = localStorage.getItem("rftUserRole") || null;
         if (message) message.innerText = "";
         document.getElementById("loginScreen").style.display = "none";
         await initApp();
@@ -72,10 +497,22 @@ async function adminLogin() {
 }
 
 function adminLogout() {
+    // Best-effort, non-blocking - see doc comment on the function itself.
+    deactivateCurrentDeviceSubscriptionOnLogout(currentUserId);
+
     localStorage.removeItem("adminLoggedIn");
+    currentUserId = null;
+    localStorage.removeItem("rftUserId");
+    currentUserRole = null;
+    localStorage.removeItem("rftUserRole");
+
     if (navigator.onLine && supabaseClient.auth) {
         supabaseClient.auth.signOut();
     }
+
+    // Finance-specific shared-device cleanup - see clearFinanceLocalData()
+    // for exactly what this does and does not remove.
+    clearFinanceLocalData();
 
     // Clear the stale "Logging in..." / error text and the password field
     // so the login screen comes back clean instead of showing leftover
@@ -91,6 +528,34 @@ function adminLogout() {
 }
 
 /* =====================================================
+   FINANCE - LOGOUT / SHARED-DEVICE CLEANUP
+
+   Wipes the local Finance IndexedDB store (the read-cache of
+   records this device has pulled down) so a Finance-populated
+   device doesn't leave that data sitting around for whoever logs
+   in next. Deliberately does NOT touch pending (not-yet-synced)
+   Finance outbox entries: those represent real unsaved edits, and
+   silently discarding them on logout would be data loss, not a
+   security fix. If a device that has unsynced Finance edits queued
+   is then used to log in as someone else before those edits sync,
+   that is a known, disclosed limitation of the shared-device/
+   generic-outbox design (see the audit) - it is closed once
+   Finance's Supabase RLS policy is locked down to the owner UID,
+   which is an explicitly separate, not-yet-approved step.
+   Does not touch students/groups/attendance/fees/exams/results
+   data or their outbox entries in any way.
+===================================================== */
+
+async function clearFinanceLocalData() {
+    try {
+        await RFT.clearStore("finance");
+    } catch (err) {
+        console.warn("Could not clear local Finance store on logout:", err);
+    }
+    finance = [];
+}
+
+/* =====================================================
    CHECK ADMIN SESSION
 
    Runs immediately on script load. Always loads app data
@@ -103,6 +568,28 @@ async function checkAdminSession() {
     const isLoggedInLocally = localStorage.getItem("adminLoggedIn") === "true";
 
     if (isLoggedInLocally) {
+        // Restore the cached user id/role first (works fully offline),
+        // then best-effort refresh them from the real Supabase session
+        // when possible. getSession() reads the locally cached, signed
+        // session and does not require a network round trip, so this
+        // still works offline - it just falls back to the cached values
+        // above if it can't run for any reason. The role refresh only
+        // overwrites the cache if the lookup actually succeeded (see
+        // fetchUserRole's doc comment) - a transient failure here keeps
+        // whatever was already cached rather than clearing it.
+        currentUserId = localStorage.getItem("rftUserId") || null;
+        currentUserRole = localStorage.getItem("rftUserRole") || null;
+        try {
+            const { data: { session } } = await supabaseClient.auth.getSession();
+            if (session && session.user) {
+                cacheUserId(session.user.id);
+                const role = await fetchUserRole(session.user.id);
+                if (role !== undefined) cacheUserRole(role);
+            }
+        } catch (err) {
+            // Ignore - keep the cached id/role restored above.
+        }
+
         const loginScreen = document.getElementById("loginScreen");
         if (loginScreen) loginScreen.style.display = "none";
         await initApp();
@@ -114,6 +601,10 @@ async function checkAdminSession() {
             const { data: { session } } = await supabaseClient.auth.getSession();
             if (session) {
                 localStorage.setItem("adminLoggedIn", "true");
+                const uid = session.user ? session.user.id : null;
+                cacheUserId(uid);
+                const role = await fetchUserRole(uid);
+                cacheUserRole(role === undefined ? null : role);
                 const loginScreen = document.getElementById("loginScreen");
                 if (loginScreen) loginScreen.style.display = "none";
                 await initApp();
@@ -133,6 +624,7 @@ checkAdminSession();
 
 let students = [];
 let fees = [];
+let finance = [];
 let exams = [];
 let results = {};        // { examId: { studentId: {id, english, nepali, math, science, total} } }
 let groups = [];
@@ -143,6 +635,10 @@ let attendanceIds = {};  // { "date|studentId": id } - lets us upsert instead of
 let studentGroup = "A";
 let attendanceGroup = "A";
 let resultGroup = "A";
+
+let events = [];
+let editingEventId = null;
+let eventsView = "upcoming"; // "upcoming" | "past"
 
 /* ---------- row (Supabase/IndexedDB shape) <-> app shape ---------- */
 
@@ -182,6 +678,81 @@ function feeFromRow(row) {
 }
 function feeToRow(f) {
     return { id: f.id, student_id: f.studentId, month: f.month, amount: Number(f.amount), date: f.paidDate, updated_at: new Date().toISOString() };
+}
+
+/* ---------- EVENTS & NOTICES ----------
+   Owner-only to add/edit/delete (see denyIfNotOwner calls in the Events
+   functions further down); Teachers can view them - so unlike "finance",
+   this table stays in the GENERIC RFT.TABLES list and goes through the
+   normal offline-first load/outbox/sync path everyone else uses. */
+function eventFromRow(row) {
+    return {
+        id: row.id,
+        title: row.title,
+        type: row.type || "Event",
+        date: row.date,
+        time: row.time || "",
+        location: row.location || "",
+        description: row.description || "",
+        targetGroup: row.target_group || "",
+        priority: row.priority || "Normal",
+        createdBy: row.created_by || "",
+        createdAt: row.created_at || null
+    };
+}
+function eventToRow(e) {
+    const row = {
+        id: e.id,
+        title: e.title,
+        type: e.type || "Event",
+        date: e.date,
+        time: e.time || null,
+        location: e.location || null,
+        description: e.description || null,
+        target_group: e.targetGroup || null,
+        priority: e.priority || "Normal",
+        created_by: e.createdBy || null,
+        updated_at: new Date().toISOString()
+    };
+    if (e.createdAt) row.created_at = e.createdAt;
+    return row;
+}
+
+/* ---------- FINANCIAL MANAGEMENT (NGO income / expense ledger) ----------
+   A separate table/store from "fees" on purpose - the old per-student fee
+   payments and the NGO's income/expense records mean different things and
+   are never converted into one another. */
+function financeFromRow(row) {
+    return {
+        id: row.id,
+        type: row.type,                       // "income" | "expense"
+        amount: Number(row.amount),
+        date: row.date,                       // transaction date (YYYY-MM-DD)
+        category: row.category,
+        description: row.description || "",
+        party: row.party || "",               // Received from / Paid to
+        method: row.method || "",             // cash / bank transfer / digital payment / ...
+        reference: row.reference || "",       // reference no. / transaction ID
+        notes: row.notes || "",
+        createdAt: row.created_at || null
+    };
+}
+function financeToRow(f) {
+    const row = {
+        id: f.id,
+        type: f.type,
+        amount: Number(f.amount),
+        date: f.date,
+        category: f.category,
+        description: f.description || "",
+        party: f.party || "",
+        method: f.method || "",
+        reference: f.reference || "",
+        notes: f.notes || "",
+        updated_at: new Date().toISOString()
+    };
+    if (f.createdAt) row.created_at = f.createdAt;
+    return row;
 }
 
 function examFromRow(row) {
@@ -309,13 +880,15 @@ async function reconcileOrphanGroups() {
 ===================================================== */
 
 async function loadAllFromLocal() {
-    const [studentRows, feeRows, examRows, groupRows, attendanceRows, resultRows] = await Promise.all([
+    const [studentRows, feeRows, examRows, groupRows, attendanceRows, resultRows, financeRows, eventRows] = await Promise.all([
         RFT.getAll("students"),
         RFT.getAll("fees"),
         RFT.getAll("exams"),
         RFT.getAll("groups"),
         RFT.getAll("attendance"),
-        RFT.getAll("results")
+        RFT.getAll("results"),
+        RFT.getAll("finance"),
+        RFT.getAll("events")
     ]);
 
     students = studentRows.map(studentFromRow)
@@ -326,6 +899,11 @@ async function loadAllFromLocal() {
 
     exams = examRows.map(examFromRow)
         .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+
+    finance = financeRows.map(financeFromRow)
+        .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
+
+    events = eventRows.map(eventFromRow);
 
     rebuildGroupsCache(groupRows);
     rebuildAttendanceCache(attendanceRows);
@@ -416,6 +994,65 @@ async function pullAllFromSupabase() {
 }
 
 /* =====================================================
+   FINANCE - ISOLATED PULL (owner-only)
+
+   Deliberately separate from pullAllFromSupabase() above, and NOT
+   driven by RFT.TABLES (see offline-core.js) - Finance must never be
+   downloaded onto a non-owner device. Mirrors the same safe-merge
+   logic (respect pending outbox, remove server-deleted rows) as
+   pullAllFromSupabase(), scoped to just the "finance" table, and
+   only ever does anything when isOwner() is true. For a non-owner
+   session this is a harmless no-op - it does not even make a
+   network request.
+===================================================== */
+
+async function pullFinanceFromSupabase() {
+    if (!isOwner()) return true; // nothing to do for a non-owner - not an error
+
+    const table = "finance";
+    let data, error;
+
+    try {
+        const res = await RFT.withAbortableTimeout(
+            supabaseClient.from(table).select("*"),
+            20000,
+            "Pull finance"
+        );
+        data = res.data;
+        error = res.error;
+    } catch (err) {
+        error = err;
+    }
+
+    if (error) {
+        console.error("Could not pull finance from Supabase:", error);
+        return false;
+    }
+
+    const pendingOutbox = await RFT.getPendingOutbox();
+    const pendingIds = new Set(
+        pendingOutbox
+            .filter(i => i.table === table && i.record && i.record.id)
+            .map(i => i.record.id)
+    );
+
+    const serverRows = data || [];
+    const serverIds = new Set(serverRows.map(r => r.id));
+
+    const rowsToStore = serverRows.filter(r => !pendingIds.has(r.id));
+
+    const localRows = await RFT.getAll(table);
+    for (const row of localRows) {
+        if (!pendingIds.has(row.id) && !serverIds.has(row.id)) {
+            await RFT.remove(table, row.id);
+        }
+    }
+
+    await RFT.putMany(table, rowsToStore);
+    return true;
+}
+
+/* =====================================================
    OUTBOX HYGIENE
    Cancels queued upserts for child records that no longer
    have anywhere to go (their parent student/exam was deleted
@@ -448,7 +1085,12 @@ async function initApp() {
     await RFT.openDB();
     await loadAllFromLocal();
     await reconcileOrphanGroups();
+    applyOwnerVisibility();
     renderAll();
+
+    // Reflects current permission/subscription state only - never
+    // itself prompts for notification permission.
+    refreshNotificationUI();
 
     if (!appEventsBound) {
         appEventsBound = true;
@@ -487,11 +1129,29 @@ async function syncNow() {
 
         if (pushResult && pushResult.failed > 0) ok = false;
 
+        // Best-effort role refresh - picks up a role change (e.g. an
+        // owner promoting/demoting someone) without requiring the
+        // affected device to log out and back in. Only overwrites the
+        // cache if the lookup actually succeeded (see fetchUserRole's
+        // doc comment), so a transient failure here can't look like a
+        // demotion.
+        if (currentUserId) {
+            const role = await fetchUserRole(currentUserId);
+            if (role !== undefined) cacheUserRole(role);
+        }
+
         const pullOk = await pullAllFromSupabase();
         if (!pullOk) ok = false;
 
+        // Finance is intentionally isolated from the generic pull above -
+        // see pullFinanceFromSupabase()'s doc comment. This is a no-op
+        // for a non-owner session.
+        const financeOk = await pullFinanceFromSupabase();
+        if (!financeOk) ok = false;
+
         await loadAllFromLocal();
         await reconcileOrphanGroups();
+        applyOwnerVisibility();
         renderAll();
     } catch (err) {
         console.error("Sync failed:", err);
@@ -1754,12 +2414,14 @@ onclick="editStudent('${s.id}')">
 <span>Edit Student</span>
 </button>
 
+${isOwner() ? `
 <button
 class="delete-option"
 onclick="deleteStudent('${s.id}')">
 🗑️
 <span>Delete Student</span>
 </button>
+` : ""}
 
 </div>
 
@@ -1789,6 +2451,8 @@ onclick="deleteStudent('${s.id}')">
    DELETE STUDENT
 ===================================================== */
 async function deleteStudent(id){
+
+    if(denyIfNotOwner(true, "Only the owner can delete students.")) return;
 
     if(!confirm(
         "⚠️ Delete this student and all their records?\n\n" +
@@ -2152,173 +2816,328 @@ ${absent}
 
 
 /* =====================================================
-   FEES
+   FINANCIAL MANAGEMENT
+   (NGO income / expense ledger - replaces the old
+   per-student Fees section now that the tuition center no
+   longer charges fees. Old fee records are left untouched
+   in the "fees" table/array - see feeFromRow/feeToRow above
+   and the Dashboard / Student History views that still read
+   them - they are simply no longer editable from here.)
 ===================================================== */
 
-function renderFeeStudentSelect(){
+const FINANCE_CATEGORIES = {
+    income: [
+        "Donation - Individual",
+        "Donation - Organization",
+        "Grant / Financial Assistance",
+        "Fundraising Collection",
+        "Other Income"
+    ],
+    expense: [
+        "Books & Educational Materials",
+        "Stationery & School Supplies",
+        "Teaching Materials & Equipment",
+        "Student Support & Educational Assistance",
+        "Transportation",
+        "Events & Activities",
+        "Food & Refreshments",
+        "Administrative Expenses",
+        "Other Operational Expense"
+    ]
+};
 
-    let select =
-        document.getElementById(
-            "feeStudent"
-        );
+const FINANCE_CUSTOM_VALUE = "__custom__";
 
+/* Fills a <select> with the preset categories for the given type
+   (income/expense), plus a "Custom category..." option, and shows/hides
+   the matching free-text input depending on what's currently selected. */
+function populateFinanceCategorySelect(selectId, type, selectedCategory){
+    let select = document.getElementById(selectId);
+    if(!select) return;
 
-    select.innerHTML = "";
+    let presets = FINANCE_CATEGORIES[type] || [];
+    let isCustom = !!selectedCategory && !presets.includes(selectedCategory);
 
+    select.innerHTML =
+        presets.map(c => `<option value="${escapeHTML(c)}">${escapeHTML(c)}</option>`).join("") +
+        `<option value="${FINANCE_CUSTOM_VALUE}">Other (type your own)...</option>`;
 
-    students.forEach(s=>{
-
-        select.innerHTML += `
-
-<option value="${s.id}">
-
-${escapeHTML(s.name)} - Group ${escapeHTML(s.group)}
-
-</option>
-
-`;
-
-    });
-
+    select.value = isCustom ? FINANCE_CUSTOM_VALUE : (selectedCategory || presets[0] || FINANCE_CUSTOM_VALUE);
 }
 
+function toggleFinanceCustomCategory(selectId, customInputId){
+    let select = document.getElementById(selectId);
+    let customInput = document.getElementById(customInputId);
+    if(!select || !customInput) return;
+
+    let showCustom = select.value === FINANCE_CUSTOM_VALUE;
+    customInput.style.display = showCustom ? "block" : "none";
+    if(!showCustom) customInput.value = "";
+}
+
+/* Income / Expense toggle buttons on the Add form. */
+function selectFinanceType(type){
+    document.getElementById("financeType").value = type;
+
+    let incomeBtn = document.getElementById("financeTypeIncomeBtn");
+    let expenseBtn = document.getElementById("financeTypeExpenseBtn");
+
+    if(type === "expense"){
+        expenseBtn.classList.add("active", "expense-active");
+        incomeBtn.classList.remove("active", "income-active");
+    } else {
+        incomeBtn.classList.add("active", "income-active");
+        expenseBtn.classList.remove("active", "expense-active");
+    }
+
+    onFinanceTypeChange();
+}
+
+/* Add form: category list depends on whether Income or Expense is
+   selected, so it's rebuilt whenever the type changes. */
+function onFinanceTypeChange(){
+    let type = document.getElementById("financeType").value === "expense" ? "expense" : "income";
+    populateFinanceCategorySelect("financeCategory", type, "");
+    toggleFinanceCustomCategory("financeCategory", "financeCategoryCustom");
+}
+
+function onFinanceCategoryChange(){
+    toggleFinanceCustomCategory("financeCategory", "financeCategoryCustom");
+}
+
+function onEditFinanceTypeChange(){
+    let type = document.getElementById("editFinanceType").value === "expense" ? "expense" : "income";
+    populateFinanceCategorySelect("editFinanceCategory", type, "");
+    toggleFinanceCustomCategory("editFinanceCategory", "editFinanceCategoryCustom");
+}
+
+function onEditFinanceCategoryChange(){
+    toggleFinanceCustomCategory("editFinanceCategory", "editFinanceCategoryCustom");
+}
 
 /* =====================================================
-   ADD FEE
-===================================================== */
-/* =====================================================
-   ADD FEE (OFFLINE-CAPABLE)
+   ADD FINANCIAL RECORD (OFFLINE-CAPABLE)
 ===================================================== */
 
-async function addFee() {
-    let studentId = document.getElementById("feeStudent").value;
-    let month = document.getElementById("feeMonth").value;
-    let amount = Number(document.getElementById("feeAmount").value);
+/* Shared guard for every Finance action/render function below, and
+   (from Stage 1 of the teacher permission fix) for owner-only actions
+   elsewhere in the app too (student/exam delete, Backup/Restore).
+   Returns true (and alerts, if requested) if the CURRENT session is
+   not the owner, so callers can do `if (denyIfNotOwner(true)) return;`
+   at the very top of a function - before any IndexedDB write, outbox
+   enqueue, or sync call. message lets each call site show wording
+   appropriate to what it's guarding; existing Finance call sites don't
+   pass one, so they keep showing exactly the same text as before. */
+function denyIfNotOwner(showAlert, message){
+    if(isOwner()) return false;
+    if(showAlert) alert(message || "Finance is restricted to the owner account.");
+    return true;
+}
 
-    if (!studentId) {
-        alert("Please select a student.");
+async function addFinance(){
+    if(denyIfNotOwner(true)) return;
+
+    let type = document.getElementById("financeType").value === "expense" ? "expense" : "income";
+    let amount = Number(document.getElementById("financeAmount").value);
+    let date = document.getElementById("financeDate").value;
+
+    let categorySelect = document.getElementById("financeCategory").value;
+    let category = categorySelect === FINANCE_CUSTOM_VALUE
+        ? document.getElementById("financeCategoryCustom").value.trim()
+        : categorySelect;
+
+    let description = document.getElementById("financeDescription").value.trim();
+    let party = document.getElementById("financeParty").value.trim();
+    let method = document.getElementById("financeMethod").value;
+    let reference = document.getElementById("financeReference").value.trim();
+    let notes = document.getElementById("financeNotes").value.trim();
+
+    if(!amount || amount <= 0 || !Number.isFinite(amount)){
+        alert("Please enter a valid amount greater than zero.");
         return;
     }
 
-    if (!month) {
-        alert("Please select a month.");
+    if(!date){
+        alert("Please select a transaction date.");
         return;
     }
 
-    if (!amount || amount <= 0) {
-        alert("Please enter a valid amount.");
+    if(!category){
+        alert("Please select or enter a category.");
         return;
     }
 
-    const newFee = {
+    const newRecord = {
         id: RFT.newId(),
-        studentId,
-        month,
+        type,
         amount,
-        paidDate: today()
+        date,
+        category,
+        description,
+        party,
+        method,
+        reference,
+        notes
     };
 
-    const row = feeToRow(newFee);
+    const row = financeToRow(newRecord);
 
-    // 1. Local-first: write to IndexedDB + in-memory immediately - works offline.
-    await RFT.put("fees", row);
-    await RFT.enqueue("fees", "upsert", row);
+    // Local-first: write to IndexedDB + in-memory immediately - works offline.
+    await RFT.put("finance", row);
+    await RFT.enqueue("finance", "upsert", row);
 
-    fees.push(newFee);
+    finance.push(newRecord);
     saveAll();
 
-    // Reset the form so the next entry starts clean instead of keeping
-    // the previous student/amount selected.
-    document.getElementById("feeStudent").value = "";
-    document.getElementById("feeAmount").value = "";
+    // Reset the form for the next entry.
+    document.getElementById("financeAmount").value = "";
+    document.getElementById("financeDescription").value = "";
+    document.getElementById("financeParty").value = "";
+    document.getElementById("financeReference").value = "";
+    document.getElementById("financeNotes").value = "";
+    document.getElementById("financeDate").value = today();
+    onFinanceTypeChange();
 
-    let selected = document.getElementById("feeSelectedStudent");
-    if (selected) {
-        selected.style.display = "none";
-        selected.innerHTML = "";
-    }
+    renderFinance();
+    renderFinanceSummary();
 
-    let searchInput = document.getElementById("feeStudentSearch");
-    if (searchInput) searchInput.value = "";
-
-    let searchResults = document.getElementById("feeStudentSearchResults");
-    if (searchResults) searchResults.innerHTML = "";
-
-    renderFees();
-    renderDashboard();
-
-    alert("Fee recorded successfully.");
+    alert((type === "income" ? "Income" : "Expense") + " record saved successfully.");
 }
 
+/* =====================================================
+   FINANCIAL DASHBOARD (Total Income / Expenses / Balance)
+===================================================== */
+
+function renderFinanceSummary(){
+    let incomeEl = document.getElementById("financeTotalIncome");
+    let expenseEl = document.getElementById("financeTotalExpenses");
+    let balanceEl = document.getElementById("financeBalance");
+
+    if(denyIfNotOwner(false)){
+        // Not the owner - leave the summary cards blank rather than
+        // computing/displaying anything derived from Finance data.
+        if(incomeEl) incomeEl.innerText = "Rs. 0";
+        if(expenseEl) expenseEl.innerText = "Rs. 0";
+        if(balanceEl) balanceEl.innerText = "Rs. 0";
+        return;
+    }
+
+    let totalIncome = finance
+        .filter(f => f.type === "income")
+        .reduce((sum, f) => sum + Number(f.amount || 0), 0);
+
+    let totalExpenses = finance
+        .filter(f => f.type === "expense")
+        .reduce((sum, f) => sum + Number(f.amount || 0), 0);
+
+    let balance = totalIncome - totalExpenses;
+
+    if(incomeEl) incomeEl.innerText = "Rs. " + totalIncome;
+    if(expenseEl) expenseEl.innerText = "Rs. " + totalExpenses;
+    if(balanceEl) balanceEl.innerText = "Rs. " + balance;
+}
 
 /* =====================================================
-   RENDER FEES
+   RENDER FINANCIAL HISTORY (search + filter + sort)
 ===================================================== */
-function renderFees(){
 
-    let table =
-        document.getElementById(
-            "feeTable"
-        );
+let financeTypeFilter = "all"; // "all" | "income" | "expense"
 
-    table.innerHTML = "";
+function setFinanceTypeFilter(type, button){
+    financeTypeFilter = type;
 
-    let search =
-        (document.getElementById("feeHistorySearch")?.value || "")
-        .trim()
-        .toLowerCase();
+    document.querySelectorAll("#fees .finance-filter-buttons button")
+        .forEach(btn => btn.classList.remove("active"));
+
+    if(button) button.classList.add("active");
+
+    renderFinance();
+}
+
+function renderFinance(){
+    let container = document.getElementById("financeTable");
+    if(!container) return;
+
+    if(denyIfNotOwner(false)){
+        container.innerHTML = "";
+        return;
+    }
+
+    container.innerHTML = "";
+
+    let search = (document.getElementById("financeSearch")?.value || "").trim().toLowerCase();
+    let categoryFilter = document.getElementById("financeCategoryFilter")?.value || "";
+    let fromDate = document.getElementById("financeFromDate")?.value || "";
+    let toDate = document.getElementById("financeToDate")?.value || "";
 
     let visibleCount = 0;
 
-    fees
+    finance
     .slice()
+    .sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")))
     .reverse()
-    .forEach(f=>{
+    .forEach(f => {
 
-        let student =
-            students.find(
-                s => s.id === f.studentId
-            );
+        if(financeTypeFilter !== "all" && f.type !== financeTypeFilter) return;
 
-        if(!student)
-            return;
+        if(categoryFilter && f.category !== categoryFilter) return;
 
-        if(search && !String(student.name || "").toLowerCase().includes(search))
-            return;
+        if(fromDate && String(f.date || "") < fromDate) return;
+        if(toDate && String(f.date || "") > toDate) return;
+
+        if(search){
+            let haystack = [f.description, f.category, f.party, f.reference]
+                .map(v => String(v || "").toLowerCase())
+                .join(" ");
+            if(!haystack.includes(search)) return;
+        }
 
         visibleCount++;
 
-        table.innerHTML += `
+        let isIncome = f.type === "income";
 
-<div class="student-list-card">
+        container.innerHTML += `
 
-<div class="student-list-card-top">
+<div class="finance-card">
 
-${studentPhotoHTML(student)}
+<div class="finance-card-top">
 
-<strong class="student-list-name">${escapeHTML(student.name)}</strong>
+<div class="finance-card-icon ${isIncome ? "finance-icon-income" : "finance-icon-expense"}">
+${isIncome ? "⬇️" : "⬆️"}
+</div>
+
+<div class="finance-card-heading">
+<strong class="student-list-name">${escapeHTML(f.category)}</strong>
+<span class="finance-card-sub">${escapeHTML(f.description || "No description")}</span>
+</div>
 
 <div class="fee-menu">
 
 <button
 class="fee-menu-button"
-onclick="toggleFeeMenu(this)">
+onclick="toggleFinanceMenu(this)">
 ⋮
 </button>
 
 <div class="fee-menu-dropdown">
 
 <button
-onclick="editFee('${f.id}')">
+onclick="viewFinance('${f.id}')">
+👁️
+<span>View Details</span>
+</button>
+
+<button
+onclick="editFinance('${f.id}')">
 ✏️
-<span>Edit Fee</span>
+<span>Edit</span>
 </button>
 
 <button
 class="delete-option"
-onclick="deleteFee('${f.id}')">
+onclick="deleteFinance('${f.id}')">
 🗑️
-<span>Delete Fee</span>
+<span>Delete</span>
 </button>
 
 </div>
@@ -2328,9 +3147,11 @@ onclick="deleteFee('${f.id}')">
 </div>
 
 <div class="recent-student-meta">
-<span>${escapeHTML(f.month)}</span>
-<span>Rs. ${f.amount}</span>
-<span class="paid">PAID</span>
+<span>${escapeHTML(f.date)}</span>
+${f.party ? `<span>${isIncome ? "From" : "To"}: ${escapeHTML(f.party)}</span>` : ""}
+${f.method ? `<span>${escapeHTML(f.method)}</span>` : ""}
+<span class="${isIncome ? "paid" : "due"}">${isIncome ? "INCOME" : "EXPENSE"}</span>
+<span class="finance-amount ${isIncome ? "paid" : "due"}">Rs. ${f.amount}</span>
 </div>
 
 </div>
@@ -2339,142 +3160,209 @@ onclick="deleteFee('${f.id}')">
 
     });
 
-    if (visibleCount === 0) {
-        table.innerHTML = `<div class="empty">${search ? "No matching student found." : "No fee records yet."}</div>`;
-    }
-
-}
-/* =====================================================
-   FEE STUDENT SEARCH & SELECTION
-===================================================== */
-
-function searchFeeStudents() {
-    let input = document.getElementById("feeStudentSearch");
-    let container = document.getElementById("feeStudentSearchResults");
-
-    if (!input || !container) return;
-
-    let search = input.value.trim().toLowerCase();
-
-    if (!search) {
-        container.innerHTML = "";
-        return;
-    }
-
-    let matches = (students || []).filter(student => {
-        let name = String(student.name || "").toLowerCase();
-        let roll = String(student.roll || "").toLowerCase();
-        let className = String(student.className || "").toLowerCase();
-        let group = String(student.group || "").toLowerCase();
-
-        return (
-            name.includes(search) ||
-            roll.includes(search) ||
-            className.includes(search) ||
-            group.includes(search)
-        );
-    });
-
-    if (matches.length === 0) {
-        container.innerHTML = `
-            <div class="fee-search-empty">
-                ❌ No student found.
-            </div>
-        `;
-        return;
-    }
-
-    let displayMatches = matches.slice(0, 30);
-    container.innerHTML = "";
-
-    displayMatches.forEach(student => {
-        let item = document.createElement("div");
-        item.className = "fee-student-result";
-
-        let photoHTML = student.photo
-            ? `<img src="${escapeHTML(student.photo)}" alt="${escapeHTML(student.name)}">`
-            : `<div class="fee-student-avatar">👤</div>`;
-
-        item.innerHTML = `
-            ${photoHTML}
-            <div class="fee-student-info">
-                <strong>${escapeHTML(student.name)}</strong>
-                <span>
-                    Class ${escapeHTML(student.className)}
-                    &nbsp; • &nbsp;
-                    Roll ${escapeHTML(student.roll)}
-                    &nbsp; • &nbsp;
-                    Group ${escapeHTML(student.group)}
-                </span>
-            </div>
-        `;
-
-        item.onclick = function() {
-            selectFeeStudent(student.id);
-        };
-
-        container.appendChild(item);
-    });
-
-    if (matches.length > 30) {
-        let more = document.createElement("div");
-        more.className = "fee-search-empty";
-        more.innerText = "Showing first 30 matches. Refine your search.";
-        container.appendChild(more);
+    if(visibleCount === 0){
+        container.innerHTML = `<div class="empty">${search || categoryFilter || fromDate || toDate || financeTypeFilter !== "all" ? "No matching financial records found." : "No financial records yet."}</div>`;
     }
 }
 
-function selectFeeStudent(id) {
-    let student = (students || []).find(s => s.id === id);
-    if (!student) return;
+/* Rebuilds the category filter dropdown from whatever categories are
+   actually in use (owner-only, like the rest of Finance). */
+function renderFinanceCategoryFilterOptions(){
+    let select = document.getElementById("financeCategoryFilter");
+    if(!select) return;
 
-    let select = document.getElementById("feeStudent");
-    if (select) {
-        select.value = String(id);
+    if(denyIfNotOwner(false)){
+        select.innerHTML = `<option value="">All Categories</option>`;
+        return;
     }
 
-    let selected = document.getElementById("feeSelectedStudent");
-    if (selected) {
-        selected.style.display = "block";
-        selected.innerHTML = `
-            <span>👤 Selected:</span>
-            <strong>${escapeHTML(student.name)}</strong>
-            <span>
-                — Class ${escapeHTML(student.className)}
-                • Roll ${escapeHTML(student.roll)}
-                • Group ${escapeHTML(student.group)}
-            </span>
-        `;
-    }
+    let current = select.value;
 
-    let searchInput = document.getElementById("feeStudentSearch");
-    if (searchInput) searchInput.value = "";
+    let categories = Array.from(new Set(finance.map(f => f.category).filter(Boolean))).sort();
 
-    let searchResults = document.getElementById("feeStudentSearchResults");
-    if (searchResults) searchResults.innerHTML = "";
+    select.innerHTML =
+        `<option value="">All Categories</option>` +
+        categories.map(c => `<option value="${escapeHTML(c)}">${escapeHTML(c)}</option>`).join("");
+
+    if(categories.includes(current)) select.value = current;
 }
 
 /* =====================================================
-   DELETE FEE (OFFLINE-CAPABLE)
+   VIEW FINANCIAL RECORD DETAILS
 ===================================================== */
 
-async function deleteFee(id) {
-    if (!confirm("Are you sure you want to delete this fee record?")) {
+function viewFinance(id){
+    if(denyIfNotOwner(true)) return;
+
+    let f = finance.find(r => r.id === id);
+    if(!f){
+        alert("Record not found.");
         return;
     }
 
-    // 1. Local-first: remove immediately, works offline.
-    await RFT.remove("fees", id);
-    await RFT.enqueue("fees", "delete", { id });
+    alert(
+        (f.type === "income" ? "INCOME RECORD" : "EXPENSE RECORD") + "\n\n" +
+        "Amount: Rs. " + f.amount + "\n" +
+        "Date: " + f.date + "\n" +
+        "Category: " + f.category + "\n" +
+        "Description: " + (f.description || "-") + "\n" +
+        (f.type === "income" ? "Received from: " : "Paid to: ") + (f.party || "-") + "\n" +
+        "Payment method: " + (f.method || "-") + "\n" +
+        "Reference / Transaction ID: " + (f.reference || "-") + "\n" +
+        "Notes: " + (f.notes || "-")
+    );
+}
 
-    fees = fees.filter(f => f.id !== id);
+/* =====================================================
+   EDIT FINANCIAL RECORD (offline-capable, inline form -
+   same pattern as Edit Student, not a prompt() chain, since
+   this record has too many fields for that)
+===================================================== */
+
+function editFinance(id){
+    if(denyIfNotOwner(true)) return;
+
+    let f = finance.find(r => r.id === id);
+    if(!f){
+        alert("Record not found.");
+        return;
+    }
+
+    document.getElementById("editFinanceBox").style.display = "block";
+    document.getElementById("editFinanceId").value = f.id;
+    document.getElementById("editFinanceType").value = f.type;
+    document.getElementById("editFinanceAmount").value = f.amount;
+    document.getElementById("editFinanceDate").value = f.date;
+
+    let type = f.type === "expense" ? "expense" : "income";
+    populateFinanceCategorySelect("editFinanceCategory", type, f.category);
+    toggleFinanceCustomCategory("editFinanceCategory", "editFinanceCategoryCustom");
+    if(document.getElementById("editFinanceCategory").value === FINANCE_CUSTOM_VALUE){
+        document.getElementById("editFinanceCategoryCustom").value = f.category;
+    }
+
+    document.getElementById("editFinanceDescription").value = f.description || "";
+    document.getElementById("editFinanceParty").value = f.party || "";
+    document.getElementById("editFinanceMethod").value = f.method || "";
+    document.getElementById("editFinanceReference").value = f.reference || "";
+    document.getElementById("editFinanceNotes").value = f.notes || "";
+
+    document.getElementById("editFinanceBox").scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+    });
+}
+
+async function saveFinanceEdit(){
+    if(denyIfNotOwner(true)) return;
+
+    let id = document.getElementById("editFinanceId").value;
+    let f = finance.find(r => r.id === id);
+    if(!f){
+        alert("Record not found.");
+        return;
+    }
+
+    let type = document.getElementById("editFinanceType").value === "expense" ? "expense" : "income";
+    let amount = Number(document.getElementById("editFinanceAmount").value);
+    let date = document.getElementById("editFinanceDate").value;
+
+    let categorySelect = document.getElementById("editFinanceCategory").value;
+    let category = categorySelect === FINANCE_CUSTOM_VALUE
+        ? document.getElementById("editFinanceCategoryCustom").value.trim()
+        : categorySelect;
+
+    if(!amount || amount <= 0 || !Number.isFinite(amount)){
+        alert("Please enter a valid amount greater than zero.");
+        return;
+    }
+
+    if(!date){
+        alert("Please select a transaction date.");
+        return;
+    }
+
+    if(!category){
+        alert("Please select or enter a category.");
+        return;
+    }
+
+    f.type = type;
+    f.amount = amount;
+    f.date = date;
+    f.category = category;
+    f.description = document.getElementById("editFinanceDescription").value.trim();
+    f.party = document.getElementById("editFinanceParty").value.trim();
+    f.method = document.getElementById("editFinanceMethod").value;
+    f.reference = document.getElementById("editFinanceReference").value.trim();
+    f.notes = document.getElementById("editFinanceNotes").value.trim();
+
+    const row = financeToRow(f);
+    await RFT.put("finance", row);
+    await RFT.enqueue("finance", "upsert", row);
     saveAll();
 
-    renderFees();
-    renderDashboard();
+    cancelFinanceEdit();
+    renderFinance();
+    renderFinanceSummary();
 
-    alert("Fee deleted.");
+    alert("✅ Record updated successfully.");
 }
+
+function cancelFinanceEdit(){
+    document.getElementById("editFinanceBox").style.display = "none";
+    document.getElementById("editFinanceId").value = "";
+}
+
+/* =====================================================
+   DELETE FINANCIAL RECORD (OFFLINE-CAPABLE)
+===================================================== */
+
+async function deleteFinance(id){
+    if(denyIfNotOwner(true)) return;
+
+    if(!confirm("Are you sure you want to delete this financial record? This cannot be undone.")){
+        return;
+    }
+
+    await RFT.remove("finance", id);
+    await RFT.enqueue("finance", "delete", { id });
+
+    finance = finance.filter(f => f.id !== id);
+    saveAll();
+
+    renderFinance();
+    renderFinanceSummary();
+
+    alert("Record deleted.");
+}
+
+/* =====================================================
+   FINANCE ACTION MENU (⋮) - same dropdown behaviour as the
+   rest of the app (toggleExamMenu/toggleFeeMenu), reusing the
+   existing .fee-menu / .fee-menu-dropdown styling.
+===================================================== */
+
+function toggleFinanceMenu(button){
+    let menu = button.parentElement.querySelector(".fee-menu-dropdown");
+
+    let willOpen = !menu.classList.contains("show");
+
+    document.querySelectorAll("#fees .fee-menu-dropdown").forEach(otherMenu => {
+        if(otherMenu !== menu) otherMenu.classList.remove("show");
+    });
+
+    if(willOpen) positionFloatingMenu(button, menu);
+    menu.classList.toggle("show");
+}
+
+document.addEventListener("click", function(event){
+    if(!event.target.closest("#fees .fee-menu")){
+        document.querySelectorAll("#fees .fee-menu-dropdown").forEach(menu => {
+            menu.classList.remove("show");
+        });
+    }
+});
 
 
 /* =====================================================
@@ -4046,9 +4934,13 @@ function renderDashboard(){
     document.getElementById("presentToday").innerText = present;
     document.getElementById("absentToday").innerText = absent;
 
-    /* Total fees */
-    let totalFees = fees.reduce((sum, fee) => sum + Number(fee.amount || 0), 0);
-    document.getElementById("dashboardTotalFees").innerText = "Rs. " + totalFees;
+    /* Total donations / income received (was "Total Fees" - this NGO
+       doesn't charge tuition fees, so this now reflects the Financial
+       Management section's income total instead). */
+    let totalDonations = finance
+        .filter(f => f.type === "income")
+        .reduce((sum, f) => sum + Number(f.amount || 0), 0);
+    document.getElementById("dashboardTotalFees").innerText = "Rs. " + totalDonations;
 
     /* Total exams */
     document.getElementById("dashboardTotalExams").innerText = exams.length;
@@ -4126,11 +5018,31 @@ function renderDashboard(){
     container.innerHTML = html;
 }
 
+/* Data Summary counts on the Backup screen (previously static "0"
+   placeholders that no code ever updated). */
+function renderBackupSummary(){
+    let studentsEl = document.getElementById("backupStudents");
+    let attendanceEl = document.getElementById("backupAttendance");
+    let feesEl = document.getElementById("backupFees");
+    let financeEl = document.getElementById("backupFinance");
+    let examsEl = document.getElementById("backupExams");
+    let groupsEl = document.getElementById("backupGroups");
+
+    if(studentsEl) studentsEl.innerText = students.length;
+    if(attendanceEl) attendanceEl.innerText = Object.keys(attendanceIds).length;
+    if(feesEl) feesEl.innerText = fees.length;
+    if(financeEl) financeEl.innerText = finance.length;
+    if(examsEl) examsEl.innerText = exams.length;
+    if(groupsEl) groupsEl.innerText = groups.length;
+}
+
 
 /* =====================================================
    BACKUP
 ===================================================== */
 async function exportData(){
+
+    if(denyIfNotOwner(true, "Backup is restricted to the owner account.")) return;
 
     try{
 
@@ -4140,7 +5052,9 @@ async function exportData(){
             feesResponse,
             examsResponse,
             resultsResponse,
-            groupsResponse
+            groupsResponse,
+            financeResponse,
+            eventsResponse
         ] = await Promise.all([
 
             supabaseClient
@@ -4166,7 +5080,18 @@ async function exportData(){
             supabaseClient
                 .from("groups")
                 .select("*")
-                .order("id", { ascending: true })
+                .order("id", { ascending: true }),
+
+            // Finance is owner-only - a non-owner session doesn't even
+            // attempt this query (RLS should also block it once locked
+            // down, but this stops it being requested at all right now).
+            isOwner()
+                ? supabaseClient.from("finance").select("*")
+                : Promise.resolve({ data: [], error: null }),
+
+            supabaseClient
+                .from("events")
+                .select("*")
 
         ]);
 
@@ -4189,6 +5114,12 @@ async function exportData(){
         if(groupsResponse.error)
             throw groupsResponse.error;
 
+        if(financeResponse.error)
+            throw financeResponse.error;
+
+        if(eventsResponse.error)
+            throw eventsResponse.error;
+
 
         let backup = {
 
@@ -4209,6 +5140,12 @@ async function exportData(){
 
             groups:
                 groupsResponse.data || [],
+
+            finance:
+                financeResponse.data || [],
+
+            events:
+                eventsResponse.data || [],
 
             backupDate:
                 new Date().toISOString()
@@ -4283,6 +5220,8 @@ async function exportData(){
 
 async function importData(){
 
+    if(denyIfNotOwner(true, "Restore is restricted to the owner account.")) return;
+
     let file =
         document.getElementById(
             "importFile"
@@ -4307,6 +5246,20 @@ async function importData(){
                     e.target.result
                 );
 
+            // Backups made before Financial Management existed won't have a
+            // "finance" array - treat that as simply no financial records
+            // to restore, rather than rejecting the whole (otherwise valid)
+            // backup file.
+            if(data && !Array.isArray(data.finance)){
+                data.finance = [];
+            }
+
+            // Backups made before Events & Notices existed won't have an
+            // "events" array either - same treatment as finance above.
+            if(data && !Array.isArray(data.events)){
+                data.events = [];
+            }
+
             if(
                 !data ||
                 !Array.isArray(data.students) ||
@@ -4314,7 +5267,9 @@ async function importData(){
                 !Array.isArray(data.fees) ||
                 !Array.isArray(data.exams) ||
                 !Array.isArray(data.results) ||
-                !Array.isArray(data.groups)
+                !Array.isArray(data.groups) ||
+                !Array.isArray(data.finance) ||
+                !Array.isArray(data.events)
             ){
 
                 alert(
@@ -4329,7 +5284,8 @@ async function importData(){
                 confirm(
                     "⚠️ WARNING!\n\n" +
                     "This will DELETE your current cloud data and replace it with this backup.\n\n" +
-                    "Students, attendance, fees, exams, results and groups will be replaced.\n\n" +
+                    "Students, attendance, fees, exams, results, groups and events/notices will be replaced" +
+                    (isOwner() ? ", along with financial records." : ". (Financial records are owner-only and are not affected by your account.)") + "\n\n" +
                     "Are you absolutely sure?"
                 );
 
@@ -4371,9 +5327,36 @@ async function importData(){
                 throw response.error;
 
 
+            // Finance is owner-only - a non-owner session doesn't touch
+            // it at all during restore (RLS should also block this once
+            // locked down, but this stops it being attempted at all
+            // right now).
+            if(isOwner()){
+                response =
+                    await supabaseClient
+                    .from("finance")
+                    .delete()
+                    .not("id", "is", null);
+
+                if(response.error)
+                    throw response.error;
+            }
+
+
             response =
                 await supabaseClient
                 .from("exams")
+                .delete()
+                .not("id", "is", null);
+
+            if(response.error)
+                throw response.error;
+
+
+            /* Delete old events/notices */
+            response =
+                await supabaseClient
+                .from("events")
                 .delete()
                 .not("id", "is", null);
 
@@ -4532,24 +5515,65 @@ async function importData(){
 
 
             /* =========================
+               RESTORE FINANCIAL RECORDS
+               (owner-only - see the delete step above for why)
+               ========================= */
+
+            if(isOwner() && data.finance.length > 0){
+
+                response =
+                    await supabaseClient
+                    .from("finance")
+                    .insert(
+                        data.finance
+                    );
+
+                if(response.error)
+                    throw response.error;
+            }
+
+
+            /* =========================
+               RESTORE EVENTS & NOTICES
+               ========================= */
+
+            if(data.events.length > 0){
+
+                response =
+                    await supabaseClient
+                    .from("events")
+                    .insert(
+                        data.events
+                    );
+
+                if(response.error)
+                    throw response.error;
+            }
+
+
+            /* =========================
                RELOAD EVERYTHING
+
+               (Previously called six/seven separate
+               loadXFromSupabase() helpers here that were never
+               actually defined anywhere in this file - every
+               restore threw a ReferenceError at this point and
+               reported "Restore failed" below, even though the
+               delete+insert above had already succeeded on
+               Supabase. Fixed by reusing the sync functions that
+               do exist and already do this correctly: pull the
+               fresh server data back into IndexedDB, reload it
+               into memory, then re-render.)
                ========================= */
 
             selectedHistoryStudentId =
                 null;
 
-
-            await loadGroupsFromSupabase();
-
-            await loadStudentsFromSupabase();
-
-            await loadAttendanceFromSupabase();
-
-            await loadFeesFromSupabase();
-
-            await loadExamsFromSupabase();
-
-            await loadResultsFromSupabase();
+            await pullAllFromSupabase();
+            await pullFinanceFromSupabase();
+            await loadAllFromLocal();
+            applyOwnerVisibility();
+            renderAll();
 
 
             document.getElementById(
@@ -4634,6 +5658,354 @@ function phoneLinkHTML(phone, fallbackText){
 
 
 /* =====================================================
+   EVENTS & NOTICES
+
+   Same offline-first pattern as everything else: write to
+   IndexedDB + in-memory immediately, queue the change, try to
+   sync now if online (saveAll()). Nothing here talks to Supabase
+   directly except through the existing generic outbox.
+
+   Permissions: Owner can add/edit/delete; Teacher can view only.
+   This mirrors Finance's denyIfNotOwner() guard on every write,
+   but (unlike Finance) the section and its data stay visible to
+   Teachers - only the write paths and the per-card ⋮ menu are
+   gated. Supabase RLS on the "events" table should also restrict
+   insert/update/delete to the owner role, the same way it does
+   for "finance" - this client-side check is a UI convenience, not
+   the real security boundary.
+===================================================== */
+
+const EVENT_TYPE_ICONS = {
+    "Event": "📅",
+    "Notice": "📢",
+    "Exam": "📝",
+    "Holiday": "🏖️",
+    "Meeting": "🤝",
+    "Class": "📚",
+    "Result": "🏆",
+    "Important": "❗",
+    "Other": "🔔"
+};
+
+const EVENT_PRIORITY_ICONS = {
+    "Urgent": "🔴",
+    "Important": "🟠",
+    "Normal": "⚪"
+};
+
+function eventTypeIcon(type){
+    return EVENT_TYPE_ICONS[type] || "🔔";
+}
+
+function eventPriorityIcon(priority){
+    return EVENT_PRIORITY_ICONS[priority] || "⚪";
+}
+
+function formatEventDate(dateStr){
+    if(!dateStr) return "";
+    try{
+        return new Date(dateStr + "T00:00:00").toLocaleDateString(undefined, {
+            year: "numeric", month: "short", day: "numeric"
+        });
+    } catch(e){
+        return dateStr;
+    }
+}
+
+/* =========================
+   ADD / EDIT (one form, same pattern as the rest of the app)
+========================= */
+
+function resetEventForm(){
+    editingEventId = null;
+
+    document.getElementById("eventTitle").value = "";
+    document.getElementById("eventDate").value = "";
+    document.getElementById("eventTime").value = "";
+    document.getElementById("eventLocation").value = "";
+    document.getElementById("eventDescription").value = "";
+    document.getElementById("eventTargetGroup").value = "";
+    document.getElementById("eventType").value = "Event";
+    document.getElementById("eventPriority").value = "Normal";
+
+    const saveBtn = document.getElementById("eventSaveButton");
+    if(saveBtn) saveBtn.innerText = "+ Add Event / Notice";
+}
+
+function editEvent(id){
+    if(denyIfNotOwner(true, "Only the owner can edit events.")) return;
+
+    let ev = events.find(e => e.id === id);
+    if(!ev){
+        alert("Event/notice not found.");
+        return;
+    }
+
+    editingEventId = id;
+
+    document.getElementById("eventTitle").value = ev.title || "";
+    document.getElementById("eventDate").value = ev.date || "";
+    document.getElementById("eventTime").value = ev.time || "";
+    document.getElementById("eventLocation").value = ev.location || "";
+    document.getElementById("eventDescription").value = ev.description || "";
+    document.getElementById("eventTargetGroup").value = ev.targetGroup || "";
+    document.getElementById("eventType").value = ev.type || "Event";
+    document.getElementById("eventPriority").value = ev.priority || "Normal";
+
+    const saveBtn = document.getElementById("eventSaveButton");
+    if(saveBtn) saveBtn.innerText = "💾 Update Event / Notice";
+
+    document.getElementById("eventTitle").scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function saveEvent(){
+    if(denyIfNotOwner(true, "Only the owner can add or edit events.")) return;
+
+    let title = document.getElementById("eventTitle").value.trim();
+    let date = document.getElementById("eventDate").value;
+    let type = document.getElementById("eventType").value;
+
+    if(!title){
+        alert("Please enter a title.");
+        return;
+    }
+    if(!date){
+        alert("Please select a date.");
+        return;
+    }
+    if(!type){
+        alert("Please select a type.");
+        return;
+    }
+
+    let time = document.getElementById("eventTime").value.trim();
+    let location = document.getElementById("eventLocation").value.trim();
+    let description = document.getElementById("eventDescription").value.trim();
+    let targetGroup = document.getElementById("eventTargetGroup").value;
+    let priority = document.getElementById("eventPriority").value;
+
+    let isEdit = !!editingEventId;
+    let ev;
+
+    if(isEdit){
+        ev = events.find(e => e.id === editingEventId);
+        if(!ev){
+            alert("Event/notice not found.");
+            return;
+        }
+    } else {
+        ev = {
+            id: RFT.newId(),
+            createdBy: currentUserId || "",
+            createdAt: new Date().toISOString()
+        };
+        events.push(ev);
+    }
+
+    ev.title = title;
+    ev.date = date;
+    ev.type = type;
+    ev.time = time;
+    ev.location = location;
+    ev.description = description;
+    ev.targetGroup = targetGroup;
+    ev.priority = priority;
+
+    const row = eventToRow(ev);
+
+    // Local-first: write to IndexedDB + in-memory immediately - works offline.
+    await RFT.put("events", row);
+    await RFT.enqueue("events", "upsert", row);
+    saveAll();
+
+    resetEventForm();
+    renderEvents();
+
+    alert(isEdit ? "✅ Event/notice updated successfully." : "✅ Event/notice added successfully.");
+}
+
+async function deleteEvent(id){
+    if(denyIfNotOwner(true, "Only the owner can delete events.")) return;
+
+    let ev = events.find(e => e.id === id);
+    if(!ev){
+        alert("Event/notice not found.");
+        return;
+    }
+
+    if(!confirm("Delete \"" + ev.title + "\"?\n\nThis cannot be undone.")){
+        return;
+    }
+
+    await RFT.remove("events", id);
+    await RFT.enqueue("events", "delete", { id });
+
+    events = events.filter(e => e.id !== id);
+
+    if(editingEventId === id){
+        resetEventForm();
+    }
+
+    saveAll();
+    renderEvents();
+
+    alert("Event/notice deleted.");
+}
+
+function selectEventsView(view){
+    eventsView = view;
+    renderEvents();
+}
+
+/* =========================
+   MENU (same viewport-aware pattern as student/fee/group/exam menus)
+========================= */
+
+function toggleEventMenu(button){
+
+    let menu =
+        button.parentElement
+        .querySelector(
+            ".event-menu-dropdown"
+        );
+
+    let willOpen = !menu.classList.contains("show");
+
+    document
+        .querySelectorAll(
+            ".event-menu-dropdown"
+        )
+        .forEach(otherMenu => {
+
+            if(otherMenu !== menu){
+                otherMenu.classList.remove(
+                    "show"
+                );
+            }
+
+        });
+
+    if(willOpen) positionFloatingMenu(button, menu);
+    menu.classList.toggle("show");
+
+}
+
+document.addEventListener("click", function(event){
+    if(!event.target.closest(".event-menu")){
+        document.querySelectorAll(".event-menu-dropdown.show")
+            .forEach(menu => menu.classList.remove("show"));
+    }
+});
+
+/* =========================
+   TARGET GROUP DROPDOWN
+========================= */
+
+function renderEventTargetGroupSelect(){
+    let select = document.getElementById("eventTargetGroup");
+    if(!select) return;
+
+    let previousValue = select.value;
+
+    select.innerHTML = `<option value="">All Students</option>` +
+        groups.map(g => `<option value="${escapeHTML(g)}">${escapeHTML(g)}</option>`).join("");
+
+    if(previousValue && (previousValue === "" || groups.includes(previousValue))){
+        select.value = previousValue;
+    }
+}
+
+/* =========================
+   RENDER
+========================= */
+
+function renderEvents(){
+    let container = document.getElementById("eventsList");
+    if(!container) return;
+
+    renderEventTargetGroupSelect();
+
+    let upcomingBtn = document.getElementById("eventsUpcomingBtn");
+    let pastBtn = document.getElementById("eventsPastBtn");
+    if(upcomingBtn) upcomingBtn.className = "btn " + (eventsView === "upcoming" ? "active" : "");
+    if(pastBtn) pastBtn.className = "btn " + (eventsView === "past" ? "active" : "");
+
+    let search =
+        (document.getElementById("eventsSearch")?.value || "")
+        .trim()
+        .toLowerCase();
+
+    let categoryFilter = document.getElementById("eventsCategoryFilter")?.value || "";
+
+    let todayStr = today();
+
+    let list = events.filter(ev => {
+        if(eventsView === "upcoming" && ev.date < todayStr) return false;
+        if(eventsView === "past" && ev.date >= todayStr) return false;
+
+        if(categoryFilter && ev.type !== categoryFilter) return false;
+
+        if(search){
+            let haystack = (ev.title + " " + (ev.description || "") + " " + (ev.location || "")).toLowerCase();
+            if(!haystack.includes(search)) return false;
+        }
+
+        return true;
+    });
+
+    list.sort((a, b) => {
+        return eventsView === "past"
+            ? String(b.date).localeCompare(String(a.date)) // most recent past first
+            : String(a.date).localeCompare(String(b.date)); // soonest upcoming first
+    });
+
+    if(list.length === 0){
+        container.innerHTML = `<div class="empty">${search || categoryFilter ? "No matching events/notices found." : (eventsView === "upcoming" ? "No upcoming events or notices." : "No past events or notices.")}</div>`;
+        return;
+    }
+
+    let owner = isOwner();
+
+    container.innerHTML = list.map(ev => {
+        let metaParts = [`<span>${escapeHTML(ev.type)}</span>`, `<span>📅 ${escapeHTML(formatEventDate(ev.date))}</span>`];
+        if(ev.time) metaParts.push(`<span>🕐 ${escapeHTML(ev.time)}</span>`);
+        if(ev.location) metaParts.push(`<span>📍 ${escapeHTML(ev.location)}</span>`);
+        metaParts.push(`<span>${escapeHTML(ev.targetGroup ? "Group " + ev.targetGroup : "All Students")}</span>`);
+
+        return `
+<div class="event-card event-priority-${escapeHTML((ev.priority || "Normal").toLowerCase())}">
+
+<div class="event-card-top">
+
+<span class="event-type-icon">${eventTypeIcon(ev.type)}</span>
+
+<strong class="student-list-name">${eventPriorityIcon(ev.priority)} ${escapeHTML(ev.title)}</strong>
+
+${owner ? `
+<div class="event-menu">
+<button class="event-menu-button" onclick="toggleEventMenu(this)">⋮</button>
+<div class="event-menu-dropdown">
+<button onclick="editEvent('${ev.id}')">✏️<span>Edit</span></button>
+<button class="delete-option" onclick="deleteEvent('${ev.id}')">🗑️<span>Delete</span></button>
+</div>
+</div>
+` : ""}
+
+</div>
+
+<div class="recent-student-meta">${metaParts.join("")}</div>
+
+${ev.description ? `<div class="recent-student-contact">${escapeHTML(ev.description)}</div>` : ""}
+
+<div class="event-footer">Added by Owner</div>
+
+</div>
+`;
+    }).join("");
+}
+
+
+/* =====================================================
    RENDER EVERYTHING
 ===================================================== */
 
@@ -4672,9 +6044,11 @@ function renderAll(){
 
     renderMonthlyAttendance();
 
-    renderFeeStudentSelect();
+    renderFinanceCategoryFilterOptions();
 
-    renderFees();
+    renderFinance();
+
+    renderFinanceSummary();
 
     renderExamSelect();
 
@@ -4682,7 +6056,11 @@ function renderAll(){
 
     renderStudentHistory();
 
+    renderEvents();
+
     renderDashboard();
+
+    renderBackupSummary();
 
     
 
@@ -4708,11 +6086,16 @@ document.getElementById(
 
 
 document.getElementById(
-    "feeMonth"
+    "financeDate"
 ).value =
-    new Date()
-    .toISOString()
-    .slice(0,7);
+    today();
+
+// One-time initial population of the Add Financial Record category
+// dropdown (defaults to Income). Deliberately NOT part of renderAll() -
+// renderAll() runs on every background sync, and re-populating this here
+// would reset whatever the teacher is mid-typing in that form, the same
+// way the rest of the app's add-forms are left alone by renderAll().
+onFinanceTypeChange();
 
 
 /* =====================================================
@@ -4819,6 +6202,8 @@ function deleteSelectedExam(){
 }
 
 async function deleteExamById(id){
+
+    if(denyIfNotOwner(true, "Only the owner can delete exams.")) return;
 
     let exam = exams.find(e => e.id === id);
 
@@ -4938,104 +6323,6 @@ document.addEventListener(
 
     }
 );
-function toggleFeeMenu(button){
-
-    let menu =
-        button.parentElement
-        .querySelector(
-            ".fee-menu-dropdown"
-        );
-
-    let willOpen = !menu.classList.contains("show");
-
-    document
-        .querySelectorAll(
-            ".fee-menu-dropdown"
-        )
-        .forEach(otherMenu => {
-
-            if(otherMenu !== menu){
-                otherMenu.classList.remove(
-                    "show"
-                );
-            }
-
-        });
-
-    if(willOpen) positionFloatingMenu(button, menu);
-    menu.classList.toggle("show");
-
-}
-document.addEventListener(
-    "click",
-    function(event){
-
-        if(
-            !event.target.closest(
-                ".fee-menu"
-            )
-        ){
-
-            document
-                .querySelectorAll(
-                    ".fee-menu-dropdown"
-                )
-                .forEach(menu => {
-
-                    menu.classList.remove(
-                        "show"
-                    );
-
-                });
-
-        }
-
-    }
-);
-async function editFee(id){
-
-    let fee = fees.find(f => f.id === id);
-
-    if(!fee){
-        alert("Fee record not found.");
-        return;
-    }
-
-    let newMonth = prompt("Enter fee month (YYYY-MM):", fee.month);
-    if(newMonth === null) return;
-    newMonth = newMonth.trim();
-    if(!newMonth){
-        alert("Month cannot be empty.");
-        return;
-    }
-
-    let newAmount = prompt("Enter fee amount:", fee.amount);
-    if(newAmount === null) return;
-    newAmount = newAmount.trim();
-    if(!newAmount){
-        alert("Amount cannot be empty.");
-        return;
-    }
-
-    let amount = Number(newAmount);
-    if(!Number.isFinite(amount) || amount < 0){
-        alert("Please enter a valid amount.");
-        return;
-    }
-
-    fee.month = newMonth;
-    fee.amount = amount;
-
-    const row = feeToRow(fee);
-    await RFT.put("fees", row);
-    await RFT.enqueue("fees", "upsert", row);
-    saveAll();
-
-    renderFees();
-
-    alert("✅ Fee updated successfully.");
-
-}
 window.addEventListener("load", function(){
 
     setTimeout(function(){
