@@ -9,7 +9,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <title>Rampur Free Tuition Center</title>
-  
+  <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
+<script>eruda.init();</script>
+
+
 <link rel="stylesheet" href="style.css">
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -125,9 +128,9 @@
 <span>Attendance</span>
 </button>
 
-<button onclick="showSection('fees',this)">
+<button id="financeNavButton" onclick="showSection('fees',this)">
 💰
-<span>Fees</span>
+<span>Finance</span>
 </button>
 
 <button onclick="showSection('results',this)">
@@ -140,7 +143,12 @@
 <span>History</span>
 </button>
 
-<button onclick="showSection('backup',this)">
+<button onclick="showSection('events',this)">
+📢
+<span>Events</span>
+</button>
+
+<button id="backupNavButton" onclick="showSection('backup',this)">
 ☁️
 <span>Backup</span>
 </button>
@@ -179,6 +187,30 @@
     <div class="dashboard-date">
         📅 <span id="dashboardDate">Today</span>
     </div>
+
+</div>
+
+
+<!-- =========================
+     NOTIFICATIONS (Stage 3 - basic subscription control only)
+========================= -->
+
+<div class="panel" id="notificationPanel">
+
+<h3>🔔 Notifications</h3>
+
+<p class="small">
+Get alerts on this device for events and attendance reminders. Notifications only arrive while this device has internet access and permission is allowed.
+</p>
+
+<button
+class="btn"
+id="notificationEnableButton"
+onclick="enablePushNotifications()">
+🔔 Enable Notifications
+</button>
+
+<p class="small" id="notificationStatusText" style="margin-top:8px;"></p>
 
 </div>
 
@@ -321,7 +353,7 @@
         </div>
 
         <div>
-            <span>Total Fees Collected</span>
+            <span>Total Donations Received</span>
 
             <strong id="dashboardTotalFees">
                 Rs. 0
@@ -919,81 +951,246 @@ onchange="renderMonthlyAttendance()">
   </section>
 
 <!-- =========================
-     FEES
+     FINANCIAL MANAGEMENT
+     (section id is still "fees" on purpose - it keeps every
+     existing #fees-scoped CSS rule and the nav button working
+     without having to touch either)
 ========================= -->
 
 <section id="fees" class="section">
 
-<h2>Fee Records</h2>
+<h2>Financial Management</h2>
 
+<!-- FINANCIAL DASHBOARD -->
+<div class="finance-summary-grid">
+
+    <div class="finance-summary-card income-summary">
+        <div class="finance-summary-icon">⬇️</div>
+        <div>
+            <span>Total Income</span>
+            <strong id="financeTotalIncome">Rs. 0</strong>
+        </div>
+    </div>
+
+    <div class="finance-summary-card expense-summary">
+        <div class="finance-summary-icon">⬆️</div>
+        <div>
+            <span>Total Expenses</span>
+            <strong id="financeTotalExpenses">Rs. 0</strong>
+        </div>
+    </div>
+
+    <div class="finance-summary-card">
+        <div class="finance-summary-icon">🏦</div>
+        <div>
+            <span>Current Balance</span>
+            <strong id="financeBalance">Rs. 0</strong>
+        </div>
+    </div>
+
+</div>
+
+
+<!-- ADD RECORD -->
 <div class="panel">
 
-<h3>Record Monthly Fee</h3>
+<h3>Add Financial Record</h3>
 
-<!-- Search student -->
-<div class="fee-student-search">
-
-<input
-type="text"
-id="feeStudentSearch"
-placeholder="🔎 Search student by name, roll, class or group..."
-oninput="searchFeeStudents()"
-autocomplete="off">
-
-<div
-id="feeStudentSearchResults"
-class="fee-student-search-results">
+<div class="finance-type-toggle">
+    <button
+        type="button"
+        id="financeTypeIncomeBtn"
+        class="active income-active"
+        onclick="selectFinanceType('income')">
+        ⬇️ Income
+    </button>
+    <button
+        type="button"
+        id="financeTypeExpenseBtn"
+        onclick="selectFinanceType('expense')">
+        ⬆️ Expense
+    </button>
 </div>
 
-</div>
-
-<!-- Selected student -->
-<div
-id="feeSelectedStudent"
-class="fee-selected-student"
-style="display:none">
-</div>
-
-<!-- Keep the original select for existing JS -->
-<select
-id="feeStudent"
-style="display:none">
+<select id="financeType" style="display:none">
+    <option value="income">Income</option>
+    <option value="expense">Expense</option>
 </select>
-
 
 <div class="form-grid">
 
-<input
-type="month"
-id="feeMonth">
+    <div class="finance-field">
+        <label>Amount (NPR) *</label>
+        <input type="number" id="financeAmount" placeholder="e.g. 1500" min="0" step="any">
+    </div>
 
-<input
-type="number"
-id="feeAmount"
-placeholder="Amount">
+    <div class="finance-field">
+        <label>Transaction Date *</label>
+        <input type="date" id="financeDate">
+    </div>
+
+    <div class="finance-field">
+        <label>Category *</label>
+        <select id="financeCategory" onchange="onFinanceCategoryChange()"></select>
+    </div>
+
+    <div class="finance-field">
+        <input type="text" id="financeCategoryCustom" placeholder="Enter custom category" style="display:none">
+    </div>
+
+    <div class="finance-field">
+        <label>Received From / Paid To</label>
+        <input type="text" id="financeParty" placeholder="Name of person or organization">
+    </div>
+
+    <div class="finance-field">
+        <label>Payment Method</label>
+        <select id="financeMethod">
+            <option value="">Not specified</option>
+            <option value="Cash">Cash</option>
+            <option value="Bank Transfer">Bank Transfer</option>
+            <option value="Digital Payment">Digital Payment</option>
+            <option value="Other">Other</option>
+        </select>
+    </div>
+
+    <div class="finance-field">
+        <label>Reference / Transaction ID</label>
+        <input type="text" id="financeReference" placeholder="Optional">
+    </div>
 
 </div>
 
-<button class="btn"
-onclick="addFee()">
-Save Fee
+<div class="finance-field">
+    <label>Description / Purpose</label>
+    <input type="text" id="financeDescription" placeholder="What is this transaction for?">
+</div>
+
+<div class="finance-field">
+    <label>Additional Notes</label>
+    <input type="text" id="financeNotes" placeholder="Optional">
+</div>
+
+<br>
+
+<button class="btn" onclick="addFinance()">
+💾 Save Record
 </button>
 
 </div>
 
 
+<!-- EDIT RECORD -->
+<div class="panel edit-box" id="editFinanceBox" style="display:none">
+
+<h3>✏️ Edit Financial Record</h3>
+
+<input type="hidden" id="editFinanceId">
+
+<select id="editFinanceType" onchange="onEditFinanceTypeChange()" style="max-width:200px">
+    <option value="income">Income</option>
+    <option value="expense">Expense</option>
+</select>
+
+<div class="form-grid">
+
+    <div class="finance-field">
+        <label>Amount (NPR) *</label>
+        <input type="number" id="editFinanceAmount" min="0" step="any">
+    </div>
+
+    <div class="finance-field">
+        <label>Transaction Date *</label>
+        <input type="date" id="editFinanceDate">
+    </div>
+
+    <div class="finance-field">
+        <label>Category *</label>
+        <select id="editFinanceCategory" onchange="onEditFinanceCategoryChange()"></select>
+    </div>
+
+    <div class="finance-field">
+        <input type="text" id="editFinanceCategoryCustom" placeholder="Enter custom category" style="display:none">
+    </div>
+
+    <div class="finance-field">
+        <label>Received From / Paid To</label>
+        <input type="text" id="editFinanceParty">
+    </div>
+
+    <div class="finance-field">
+        <label>Payment Method</label>
+        <select id="editFinanceMethod">
+            <option value="">Not specified</option>
+            <option value="Cash">Cash</option>
+            <option value="Bank Transfer">Bank Transfer</option>
+            <option value="Digital Payment">Digital Payment</option>
+            <option value="Other">Other</option>
+        </select>
+    </div>
+
+    <div class="finance-field">
+        <label>Reference / Transaction ID</label>
+        <input type="text" id="editFinanceReference">
+    </div>
+
+</div>
+
+<div class="finance-field">
+    <label>Description / Purpose</label>
+    <input type="text" id="editFinanceDescription">
+</div>
+
+<div class="finance-field">
+    <label>Additional Notes</label>
+    <input type="text" id="editFinanceNotes">
+</div>
+
+<br>
+
+<button class="btn green" onclick="saveFinanceEdit()">
+💾 Save Changes
+</button>
+
+<button class="btn gray" onclick="cancelFinanceEdit()">
+Cancel
+</button>
+
+</div>
+
+
+<!-- FINANCIAL HISTORY -->
 <div class="panel">
 
-<h3>Fee History</h3>
+<h3>Financial History</h3>
 
-<input
-type="text"
-id="feeHistorySearch"
-placeholder="🔎 Search by student name..."
-oninput="renderFees()"
-style="width:100%; box-sizing:border-box; margin-bottom:10px;">
+<div class="finance-filters">
 
-<div class="fee-cards" id="feeTable"></div>
+    <input
+        type="text"
+        id="financeSearch"
+        placeholder="🔎 Search by description, category, person or reference..."
+        oninput="renderFinance()"
+        style="width:100%; box-sizing:border-box;">
+
+    <div class="finance-filter-buttons">
+        <button type="button" class="active" onclick="setFinanceTypeFilter('all', this)">All</button>
+        <button type="button" onclick="setFinanceTypeFilter('income', this)">Income</button>
+        <button type="button" onclick="setFinanceTypeFilter('expense', this)">Expense</button>
+    </div>
+
+    <select id="financeCategoryFilter" onchange="renderFinance()">
+        <option value="">All Categories</option>
+    </select>
+
+    <div class="finance-date-range">
+        <input type="date" id="financeFromDate" onchange="renderFinance()">
+        <input type="date" id="financeToDate" onchange="renderFinance()">
+    </div>
+
+</div>
+
+<div class="finance-cards-wrapper" id="financeTable"></div>
 
 </div>
 
@@ -1060,6 +1257,7 @@ onclick="editSelectedExam()">
 </button>
 
 <button
+id="deleteExamButton"
 class="delete-option"
 onclick="deleteSelectedExam()">
 🗑️
@@ -1199,6 +1397,172 @@ style="display:none">
 
 
 <!-- =========================
+     EVENTS & NOTICES
+========================= -->
+
+<section id="events" class="section">
+
+<div class="events-heading">
+
+    <div>
+        <span class="events-eyebrow">
+            📢 EVENTS &amp; NOTICES
+        </span>
+
+        <h2>Events &amp; Notices</h2>
+
+        <p>
+            Announcements, exams, holidays and meeting notices for students and staff.
+        </p>
+    </div>
+
+</div>
+
+
+<div class="events-panel panel" id="eventFormPanel">
+
+    <div class="events-panel-header">
+
+        <div class="events-panel-title">
+
+            <div class="events-panel-icon add-icon">
+                ➕
+            </div>
+
+            <div>
+                <h3 id="eventFormTitle">Add Event / Notice</h3>
+
+                <p>
+                    Create an announcement, exam notice, holiday or meeting.
+                </p>
+            </div>
+
+        </div>
+
+    </div>
+
+    <div class="form-grid">
+
+    <div class="event-field">
+    <label>Title *</label>
+    <input type="text" id="eventTitle" placeholder="e.g. Monthly Test">
+    </div>
+
+    <div class="event-field">
+    <label>Type *</label>
+    <select id="eventType">
+    <option>Event</option>
+    <option>Notice</option>
+    <option>Exam</option>
+    <option>Holiday</option>
+    <option>Meeting</option>
+    <option>Class</option>
+    <option>Result</option>
+    <option>Important</option>
+    <option>Other</option>
+    </select>
+    </div>
+
+    <div class="event-field">
+    <label>Priority</label>
+    <select id="eventPriority">
+    <option>Normal</option>
+    <option>Important</option>
+    <option>Urgent</option>
+    </select>
+    </div>
+
+    <div class="event-field">
+    <label>Date *</label>
+    <input type="date" id="eventDate">
+    </div>
+
+    <div class="event-field">
+    <label>Time (optional)</label>
+    <input type="time" id="eventTime">
+    </div>
+
+    <div class="event-field">
+    <label>Location (optional)</label>
+    <input type="text" id="eventLocation" placeholder="e.g. Rampur Free Tuition Center">
+    </div>
+
+    <div class="event-field">
+    <label>Target (optional)</label>
+    <select id="eventTargetGroup">
+    <option value="">All Students</option>
+    </select>
+    </div>
+
+    </div>
+
+    <div class="event-field">
+    <label>Description (optional)</label>
+    <textarea id="eventDescription" rows="3" placeholder="Details..."></textarea>
+    </div>
+
+    <button class="btn" id="eventSaveButton" onclick="saveEvent()">+ Add Event / Notice</button>
+    <button class="btn gray" onclick="resetEventForm()">Cancel</button>
+
+</div>
+
+
+<div class="events-panel panel">
+
+    <div class="events-panel-header">
+
+        <div class="events-panel-title">
+
+            <div class="events-panel-icon list-icon">
+                🔎
+            </div>
+
+            <div>
+                <h3>Browse Events</h3>
+
+                <p>
+                    Search and filter upcoming or past events and notices.
+                </p>
+            </div>
+
+        </div>
+
+    </div>
+
+    <div class="group-buttons">
+    <button class="btn active" id="eventsUpcomingBtn" onclick="selectEventsView('upcoming')">Upcoming</button>
+    <button class="btn" id="eventsPastBtn" onclick="selectEventsView('past')">Past</button>
+    </div>
+
+    <input
+    type="text"
+    id="eventsSearch"
+    placeholder="🔎 Search events/notices..."
+    oninput="renderEvents()"
+    style="width:100%; box-sizing:border-box;">
+
+    <select id="eventsCategoryFilter" onchange="renderEvents()">
+    <option value="">All Categories</option>
+    <option>Event</option>
+    <option>Notice</option>
+    <option>Exam</option>
+    <option>Holiday</option>
+    <option>Meeting</option>
+    <option>Class</option>
+    <option>Result</option>
+    <option>Important</option>
+    <option>Other</option>
+    </select>
+
+    <div id="eventsList"></div>
+
+</div>
+
+</section>
+
+
+
+<!-- =========================
      BACKUP
 ========================= -->
 
@@ -1258,8 +1622,13 @@ Attendance records:
 </p>
 
 <p>
-Fee records:
+Fee records (legacy):
 <b id="backupFees">0</b>
+</p>
+
+<p>
+Financial records:
+<b id="backupFinance">0</b>
 </p>
 
 <p>
