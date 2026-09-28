@@ -11,7 +11,7 @@
    on stale cached JS/CSS.
    ========================================================= */
 
-const CACHE_NAME = "rampur-free-tuition-v23";
+const CACHE_NAME = "rampur-free-tuition-v22";
 
 const APP_SHELL = [
     "./",
