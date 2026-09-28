@@ -215,6 +215,28 @@ onclick="enablePushNotifications()">
 
 
 <!-- =========================
+     TEMPORARY (Stage 6A): OWNER-ONLY PUSH TEST
+     Hidden by default; shown only by applyOwnerVisibility().
+     Remove together with sendTestPush() in script.js.
+========================= -->
+
+<div class="panel" id="pushTestPanel" style="display:none;">
+
+<h3>🧪 Push Test (temporary, owner only)</h3>
+
+<button
+class="btn"
+id="pushTestButton"
+onclick="sendTestPush()">
+🔔 Send Test Push
+</button>
+
+<p class="small" id="pushTestStatus" style="margin-top:8px;">Not tested yet</p>
+
+</div>
+
+
+<!-- =========================
      STAT CARDS
 ========================= -->
 
@@ -1671,4 +1693,4 @@ if ("serviceWorker" in navigator) {
   </script>
   
 </body>
-  </html>
+</html>
