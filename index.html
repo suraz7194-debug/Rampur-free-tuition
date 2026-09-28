@@ -237,6 +237,31 @@ onclick="sendTestPush()">
 
 
 <!-- =========================
+     TEMPORARY (Stage 7B-test): OWNER-ONLY ABSENCE ENGINE DRY TEST
+     Hidden by default; shown only by applyOwnerVisibility().
+     Always runs the engine in DRY-RUN mode (writes nothing).
+     Remove together with runAbsenceEngineDryTest() in script.js.
+========================= -->
+
+<div class="panel" id="absenceEngineTestPanel" style="display:none;">
+
+<h3>🧪 Absence Alert Engine Test (temporary, owner only)</h3>
+
+<p class="small">Dry run only: checks what the engine would do. It changes nothing and sends no notifications.</p>
+
+<button
+class="btn"
+id="absenceEngineTestButton"
+onclick="runAbsenceEngineDryTest()">
+▶ Run Dry Test
+</button>
+
+<p class="small" id="absenceEngineTestStatus" style="margin-top:8px; white-space:pre-line;">Not tested yet</p>
+
+</div>
+
+
+<!-- =========================
      STAT CARDS
 ========================= -->
 
@@ -1693,4 +1718,4 @@ if ("serviceWorker" in navigator) {
   </script>
   
 </body>
-</html>
+  </html>
