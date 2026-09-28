@@ -171,6 +171,11 @@ function applyOwnerVisibility() {
     // Hidden in the HTML by default; only ever shown here. Remove with the panel.
     let absenceEngineTestPanel = document.getElementById("absenceEngineTestPanel");
     if (absenceEngineTestPanel) absenceEngineTestPanel.style.display = owner ? "" : "none";
+
+    // TEMPORARY (Stage 7C): owner-only Absence Push Test panel. Hidden in the
+    // HTML by default; only ever shown here. Remove with the panel.
+    let absencePushTestPanel = document.getElementById("absencePushTestPanel");
+    if (absencePushTestPanel) absencePushTestPanel.style.display = owner ? "" : "none";
 }
 
 /* =====================================================
@@ -580,6 +585,91 @@ async function runAbsenceEngineDryTest() {
     } finally {
         absenceEngineTestInFlight = false;
         if (button) { button.disabled = false; button.textContent = "▶ Run Dry Test"; }
+    }
+}
+
+/* =====================================================
+   TEMPORARY (Stage 7C) - OWNER-ONLY "SEND TEST ABSENCE PUSH" HANDLER
+   Invokes the deployed "absence-alert-notify" Edge Function in its
+   SYNTHETIC test mode: one clearly-labelled TEST notification is sent to
+   the logged-in Owner's OWN subscribed devices only. No absence_alerts
+   row is read, created or changed, and no real student/attendance data
+   is involved. The request carries only { mode: "synthetic" } - no
+   recipient, content, key or alert id can be supplied from here.
+   Results are shown from an allow-list of labels/numbers only.
+   NOTE: "accepted" means the push service accepted the request, NOT
+   that the phone displayed it.
+   Remove this function, absencePushTestPanel in index.html, and the one
+   block in applyOwnerVisibility() when testing is finished.
+===================================================== */
+let absencePushTestInFlight = false;
+
+async function runAbsencePushTest() {
+    if (!isOwner()) return;                     // defensive: UI is already hidden for non-owners
+    if (absencePushTestInFlight) return;        // prevent duplicate simultaneous requests
+
+    const button = document.getElementById("absencePushTestButton");
+    const status = document.getElementById("absencePushTestStatus");
+    const setStatus = text => { if (status) status.textContent = text; };
+    const num = v => (typeof v === "number" && isFinite(v)) ? v : 0;
+
+    if (!navigator.onLine) {
+        setStatus("Absence push test failed: this device is offline.");
+        return;
+    }
+
+    absencePushTestInFlight = true;
+    if (button) { button.disabled = true; button.textContent = "⏳ Sending..."; }
+    setStatus("Sending test push request...");
+
+    const messages = {
+        already_sent_today: "ℹ️ Already sent today for this test — duplicate protection worked. No new notification was sent.",
+        no_active_subscription: "❌ No active notification subscription found for your account. Enable notifications first.",
+        no_authorized_recipients: "❌ Your account is not an authorized recipient.",
+        vapid_configuration_error: "❌ Push server configuration error.",
+        push_failed: "❌ The push service rejected or could not deliver the request.",
+        database_error: "❌ A database error occurred on the server.",
+        invalid_request: "❌ The request was not valid."
+    };
+
+    try {
+        const { data, error } = await supabaseClient.functions.invoke("absence-alert-notify", {
+            body: { mode: "synthetic" }         // the only thing this UI can ever request
+        });
+
+        let result = null, body = data;
+        if (error) {
+            body = null;
+            try {
+                if (error.context && typeof error.context.json === "function") body = await error.context.json();
+            } catch (_) { /* unreadable body - generic message below */ }
+            result = body && typeof body.result === "string" ? body.result : null;
+            if (result === "owner_required") setStatus("Absence push test failed: Owner access required.");
+            else if (result === "unauthenticated") setStatus("Absence push test failed: please log in again.");
+            else if (result && messages[result]) setStatus("Absence push test failed: " + messages[result].replace(/^❌ /, ""));
+            else setStatus("Absence push test failed: request failed.");
+        } else {
+            result = body && typeof body.result === "string" ? body.result : null;
+            const subs = (body && body.subscriptions) || {};
+            if (result === "sent") {
+                const lines = [
+                    "✅ Push request accepted for " + num(subs.succeeded) + " device(s) — check your phone. (This does not prove it was displayed.)",
+                    "Devices that failed: " + num(subs.failed) + " · Expired devices deactivated: " + num(subs.expiredDeactivated),
+                    "Test alert only — no real alert, student or attendance data was used."
+                ];
+                setStatus(lines.join("\n"));
+            } else if (result && messages[result]) {
+                setStatus(messages[result]);
+            } else {
+                setStatus("Absence push test failed: unexpected response.");
+            }
+        }
+    } catch (err) {
+        console.warn("Absence push test failed:", err);
+        setStatus("Absence push test failed: could not reach the server.");
+    } finally {
+        absencePushTestInFlight = false;
+        if (button) { button.disabled = false; button.textContent = "🔔 Send Test Absence Push"; }
     }
 }
 
