@@ -3734,3 +3734,594 @@ body{
     overflow: visible;
     text-overflow: clip;
 }
+
+/* =====================================================
+   FINANCIAL MANAGEMENT
+   (new NGO income/expense section that replaces the old
+   Fees UI - reuses .panel/.form-grid/.btn/.edit-box/.paid/
+   .due/.empty/.fee-menu*, which are already generic. This
+   block only adds the bits that are genuinely new: the
+   summary cards, labeled form fields, filter buttons and the
+   transaction list card.)
+===================================================== */
+
+#fees .finance-summary-grid{
+    display:grid;
+    grid-template-columns:repeat(3, minmax(0, 1fr));
+    gap:12px;
+    margin-bottom:15px;
+}
+
+#fees .finance-summary-card{
+    display:flex;
+    align-items:center;
+    gap:11px;
+    background:#fff;
+    border:1px solid #e5e7eb;
+    border-radius:10px;
+    padding:13px;
+    box-shadow:0 2px 6px rgba(0,0,0,.04);
+}
+
+#fees .finance-summary-icon{
+    width:38px;
+    height:38px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#f1f5f9;
+    border-radius:9px;
+    font-size:18px;
+    flex-shrink:0;
+}
+
+#fees .finance-summary-card span{
+    display:block;
+    font-size:12px;
+    color:#64748b;
+    margin-bottom:3px;
+}
+
+#fees .finance-summary-card strong{
+    display:block;
+    font-size:17px;
+    color:#1e293b;
+}
+
+#fees .finance-summary-card.income-summary strong{
+    color:#16a34a;
+}
+
+#fees .finance-summary-card.expense-summary strong{
+    color:#dc2626;
+}
+
+@media (max-width:700px){
+    #fees .finance-summary-grid{
+        grid-template-columns:repeat(1, minmax(0, 1fr));
+        gap:9px;
+    }
+}
+
+/* Labeled form fields (mirrors #students .student-field) */
+#fees .finance-field{
+    min-width:0;
+}
+
+#fees .finance-field label{
+    display:block;
+    margin:0 0 6px;
+    color:#475569;
+    font-size:11px;
+    font-weight:700;
+}
+
+#fees .finance-field input,
+#fees .finance-field select,
+#fees .finance-field textarea{
+    margin:0;
+    padding:11px 12px;
+    background:#f8fafc;
+    border:1px solid #dbe3ed;
+    border-radius:9px;
+    color:#1e293b;
+    font-family:inherit;
+    transition:
+        border-color .2s ease,
+        box-shadow .2s ease,
+        background .2s ease;
+}
+
+#fees .finance-field input:focus,
+#fees .finance-field select:focus,
+#fees .finance-field textarea:focus{
+    outline:none;
+    background:#fff;
+    border-color:#60a5fa;
+    box-shadow:0 0 0 3px rgba(37,99,235,.09);
+}
+
+/* Income / Expense type toggle on the Add form */
+#fees .finance-type-toggle{
+    display:flex;
+    gap:8px;
+    margin-bottom:12px;
+}
+
+#fees .finance-type-toggle button{
+    flex:1;
+    border:1px solid #e2e8f0;
+    background:#f8fafc;
+    color:#475569;
+    padding:10px;
+    border-radius:9px;
+    font-weight:700;
+    font-size:13px;
+}
+
+#fees .finance-type-toggle button.active.income-active{
+    background:#16a34a;
+    border-color:#16a34a;
+    color:#fff;
+}
+
+#fees .finance-type-toggle button.active.expense-active{
+    background:#dc2626;
+    border-color:#dc2626;
+    color:#fff;
+}
+
+/* Filter row above Financial History */
+#fees .finance-filters{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    margin-bottom:12px;
+}
+
+#fees .finance-filter-buttons{
+    display:flex;
+    flex-wrap:wrap;
+    gap:7px;
+}
+
+#fees .finance-filter-buttons button{
+    border:0;
+    background:#e5e7eb;
+    padding:9px 15px;
+    border-radius:7px;
+    font-weight:600;
+}
+
+#fees .finance-filter-buttons button.active{
+    background:#2563eb;
+    color:#fff;
+}
+
+#fees .finance-date-range{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+}
+
+#fees .finance-date-range input{
+    flex:1;
+    min-width:140px;
+}
+
+/* Transaction list cards (mirrors .student-list-card, but without the
+   avatar-width indent, so it needs its own class rather than reusing
+   .student-list-card directly). */
+.finance-cards-wrapper{
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    width:100%;
+}
+
+.finance-card{
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    padding:10px 14px;
+    background:#ffffff;
+    border:1px solid #e2e8f0;
+    border-radius:8px;
+    box-shadow:0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.finance-card-top{
+    display:flex;
+    align-items:center;
+    gap:12px;
+}
+
+.finance-card-icon{
+    width:36px;
+    height:36px;
+    flex-shrink:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:9px;
+    font-size:15px;
+}
+
+.finance-icon-income{
+    background:#dcfce7;
+}
+
+.finance-icon-expense{
+    background:#fee2e2;
+}
+
+.finance-card-heading{
+    flex:1;
+    min-width:0;
+    display:flex;
+    flex-direction:column;
+}
+
+.finance-card-sub{
+    font-size:0.78rem;
+    color:#64748b;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+}
+
+.finance-amount{
+    font-weight:700;
+}
+
+/* =====================================================
+   EVENTS & NOTICES
+   (mirrors #fees .finance-field* / .finance-card* - see the
+   comment above those - same reasoning: a labeled form field
+   and a list card, without the avatar-width indent baked into
+   .student-list-card, so it needs its own scoped classes.)
+===================================================== */
+
+/* Labeled form fields (mirrors #fees .finance-field) */
+#events .event-field{
+    min-width:0;
+}
+
+#events .event-field label{
+    display:block;
+    margin:0 0 6px;
+    color:#475569;
+    font-size:11px;
+    font-weight:700;
+}
+
+#events .event-field input,
+#events .event-field select,
+#events .event-field textarea{
+    margin:0;
+    padding:11px 12px;
+    background:#f8fafc;
+    border:1px solid #dbe3ed;
+    border-radius:9px;
+    color:#1e293b;
+    font-family:inherit;
+    transition:
+        border-color .2s ease,
+        box-shadow .2s ease,
+        background .2s ease;
+}
+
+#events .event-field input:focus,
+#events .event-field select:focus,
+#events .event-field textarea:focus{
+    outline:none;
+    background:#fff;
+    border-color:#60a5fa;
+    box-shadow:0 0 0 3px rgba(37,99,235,.09);
+}
+
+/* Event / notice list cards (mirrors .finance-card) */
+.event-card{
+    display:flex;
+    flex-direction:column;
+    gap:4px;
+    padding:10px 14px;
+    background:#ffffff;
+    border:1px solid #e2e8f0;
+    border-left:4px solid #cbd5e1;
+    border-radius:8px;
+    box-shadow:0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.event-card.event-priority-urgent{
+    border-left-color:#dc2626;
+}
+
+.event-card.event-priority-important{
+    border-left-color:#ea580c;
+}
+
+.event-card.event-priority-normal{
+    border-left-color:#cbd5e1;
+}
+
+.event-card-top{
+    display:flex;
+    align-items:center;
+    gap:10px;
+}
+
+.event-type-icon{
+    width:36px;
+    height:36px;
+    flex-shrink:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:9px;
+    background:#eff6ff;
+    font-size:16px;
+}
+
+.event-card .event-menu{
+    flex-shrink:0;
+}
+
+.event-footer{
+    font-size:0.72rem;
+    color:#94a3b8;
+    margin-top:2px;
+}
+
+/* EVENTS — ACTION MENU (mirrors #fees .fee-menu*) */
+
+#events .event-menu{
+    position:relative;
+    display:inline-block;
+}
+
+#events .event-menu-button{
+    width:36px;
+    height:36px;
+
+    display:flex;
+    align-items:center;
+    justify-content:center;
+
+    border:1px solid transparent;
+    border-radius:8px;
+
+    background:transparent;
+    color:#64748b;
+
+    font-size:21px;
+    line-height:1;
+
+    cursor:pointer;
+
+    transition:
+        background .18s ease,
+        color .18s ease,
+        transform .18s ease;
+}
+
+#events .event-menu-button:hover{
+    background:#eff6ff;
+    color:#2563eb;
+}
+
+#events .event-menu-button:active{
+    transform:scale(.92);
+}
+
+#events .event-menu-dropdown{
+    position:fixed; /* actual top/left are computed in JS (positionFloatingMenu) so it never gets clipped or opens off-screen */
+
+    z-index:100;
+
+    min-width:150px;
+    padding:5px;
+
+    background:#fff;
+
+    border:1px solid #e2e8f0;
+    border-radius:10px;
+
+    box-shadow:0 10px 25px rgba(15,23,42,.12);
+
+    opacity:0;
+    visibility:hidden;
+
+    transform:translateY(-5px) scale(.98);
+    transform-origin:top right;
+
+    transition:
+        opacity .15s ease,
+        visibility .15s ease,
+        transform .15s ease;
+}
+
+#events .event-menu-dropdown.show{
+    opacity:1;
+    visibility:visible;
+
+    transform:translateY(0) scale(1);
+}
+
+#events .event-menu-dropdown button{
+    width:100%;
+
+    display:flex;
+    align-items:center;
+    gap:9px;
+
+    padding:9px 10px;
+
+    border:0;
+    border-radius:7px;
+
+    background:transparent;
+    color:#334155;
+
+    text-align:left;
+
+    font-size:12px;
+    font-weight:600;
+
+    cursor:pointer;
+
+    transition:
+        background .15s ease,
+        color .15s ease;
+}
+
+#events .event-menu-dropdown button:hover{
+    background:#f1f5f9;
+    color:#2563eb;
+}
+
+#events .event-menu-dropdown button.delete-option:hover{
+    background:#fef2f2;
+    color:#dc2626;
+}
+
+/* =====================================================
+   EVENTS & NOTICES — PAGE HEADER + PANELS
+   (mirrors #students .students-heading / .students-panel* -
+   same visual system, scoped to #events instead.)
+===================================================== */
+
+#events .events-heading{
+    margin-bottom:22px;
+}
+
+#events .events-eyebrow{
+    display:inline-block;
+
+    padding:5px 9px;
+
+    background:#eff6ff;
+    color:#2563eb;
+
+    border-radius:7px;
+
+    font-size:10px;
+    font-weight:800;
+    letter-spacing:1px;
+}
+
+#events .events-heading h2{
+    margin:8px 0 4px;
+
+    color:#172033;
+
+    font-size:30px;
+    line-height:1.15;
+
+    font-weight:800;
+}
+
+#events .events-heading p{
+    margin:0;
+
+    color:#64748b;
+
+    font-size:13px;
+}
+
+#events .events-panel{
+    margin-top:15px;
+
+    padding:19px;
+
+    border:1px solid #e2e8f0;
+
+    border-radius:16px;
+
+    box-shadow:
+        0 5px 16px rgba(15,23,42,.055);
+
+    transition:
+        box-shadow .2s ease,
+        transform .2s ease;
+}
+
+#events .events-panel:hover{
+    box-shadow:
+        0 8px 21px rgba(15,23,42,.08);
+}
+
+#events .events-panel-header{
+    display:flex;
+
+    align-items:center;
+
+    justify-content:space-between;
+
+    gap:12px;
+
+    margin-bottom:17px;
+}
+
+#events .events-panel-title{
+    display:flex;
+
+    align-items:center;
+
+    gap:11px;
+}
+
+#events .events-panel-icon{
+    width:42px;
+    height:42px;
+    min-width:42px;
+
+    display:flex;
+
+    align-items:center;
+    justify-content:center;
+
+    border-radius:11px;
+
+    background:#eff6ff;
+    color:#2563eb;
+
+    font-size:18px;
+}
+
+#events .events-panel-icon.add-icon{
+    background:#dcfce7;
+    color:#16a34a;
+}
+
+#events .events-panel-icon.list-icon{
+    background:#eff6ff;
+    color:#2563eb;
+}
+
+#events .events-panel-title h3{
+    margin:0;
+
+    color:#172033;
+
+    font-size:16px;
+    font-weight:800;
+}
+
+#events .events-panel-title p{
+    margin:3px 0 0;
+
+    color:#94a3b8;
+
+    font-size:11px;
+}
+
+@media (max-width:640px){
+    #events .events-heading h2{
+        font-size:24px;
+    }
+
+    #events .events-panel{
+        padding:15px;
+    }
+}
