@@ -24,10 +24,29 @@
     "use strict";
 
     const DB_NAME = "RampurFreeTuitionDB";
-    const DB_VERSION = 1;
+    // v3: adds the "events" object store (Events & Notices section).
+    // onupgradeneeded only creates stores that don't already exist, so
+    // the existing "finance", "fees" and every other store and all of
+    // their data are left exactly as they were.
+    const DB_VERSION = 3;
 
-    // Tables that are mirrored locally and synced to Supabase.
-    const TABLES = ["students", "groups", "attendance", "fees", "exams", "results"];
+    // Tables that are mirrored locally and synced to Supabase via the
+    // GENERIC sync engine (pullAllFromSupabase/processOutbox loop over
+    // this list in script.js). "finance" is deliberately NOT in this
+    // list - it is owner-only and is pulled/pushed through isolated,
+    // owner-gated functions in script.js instead (pullFinanceFromSupabase,
+    // and owner-checked addFinance/editFinance/deleteFinance), so a
+    // teacher session can never have Finance downloaded to it or enqueue
+    // a Finance outbox entry via the generic path.
+    // "fees" is kept (not renamed/removed) so existing historical fee
+    // records stay intact for the Dashboard and Student History views.
+    // "events" (Events & Notices) IS in this generic list, unlike
+    // "finance" - Teachers are allowed to view Events (just not
+    // add/edit/delete them), so it goes through the same generic
+    // pull/outbox path as students/attendance/etc.; the owner-only
+    // restriction on writes is enforced in script.js (denyIfNotOwner)
+    // and should also be enforced by Supabase RLS on the "events" table.
+    const TABLES = ["students", "groups", "attendance", "fees", "exams", "results", "events"];
 
     let dbPromise = null;
     let syncing = false;
@@ -54,6 +73,16 @@
                         db.createObjectStore(name, { keyPath: "id" });
                     }
                 });
+
+                // "finance" is intentionally NOT in TABLES (see comment
+                // above) so it is created explicitly here instead. This
+                // does not delete or recreate the database - it only
+                // creates the store if it doesn't already exist, exactly
+                // like every other store above. Existing Finance data in
+                // this store (if any) is untouched.
+                if (!db.objectStoreNames.contains("finance")) {
+                    db.createObjectStore("finance", { keyPath: "id" });
+                }
 
                 if (!db.objectStoreNames.contains("outbox")) {
                     const store = db.createObjectStore("outbox", {
@@ -356,11 +385,60 @@
                         error = res.error;
                     } else if (item.action === "delete") {
                         const res = await withAbortableTimeout(
-                            supabaseClient.from(item.table).delete().eq("id", item.record.id),
+                            supabaseClient.from(item.table).delete().eq("id", item.record.id).select("id"),
                             20000,
                             "Delete"
                         );
                         error = res.error;
+
+                        // error === null does NOT necessarily mean the row was
+                        // actually deleted: if RLS filters the row out for this
+                        // session, Postgres/PostgREST report a normal, error-free
+                        // response having deleted zero rows - indistinguishable
+                        // from success unless the deleted rows are requested back
+                        // via .select(), which is why that's now chained above.
+                        // A non-empty res.data means at least one row was
+                        // genuinely deleted - handled by the normal success path
+                        // below, unchanged. An empty array means nothing was
+                        // actually deleted; handled here, separately, because it
+                        // must NOT fall through to that same success path.
+                        //
+                        // This can mean either RLS silently blocked the delete,
+                        // or the row was already removed by another device or
+                        // session first - there is no way to tell which from this
+                        // response alone, so no specific cause is claimed.
+                        //
+                        // Reuses the existing attempts/lastError mechanism rather
+                        // than adding a new outbox status, but caps retries for
+                        // this specific case so a permanently-unauthorized delete
+                        // doesn't queue forever: once a few consecutive attempts
+                        // have all come back zero-row, the item is dropped -
+                        // still counted as a failure for this sync pass (never as
+                        // a success), just no longer retried.
+                        if (!error && Array.isArray(res.data) && res.data.length === 0) {
+                            const ZERO_ROW_MESSAGE =
+                                "Delete could not be confirmed. The server may have already removed the record or your account may not have permission.";
+                            const ZERO_ROW_RETRY_LIMIT = 3;
+
+                            const priorAttempts = item.attempts || 0;
+
+                            if (item.lastError === ZERO_ROW_MESSAGE && priorAttempts >= ZERO_ROW_RETRY_LIMIT) {
+                                // Given up after repeated zero-row results - this
+                                // is NOT a success, just stopping asking Supabase
+                                // to do something it has already told us,
+                                // repeatedly, it isn't doing.
+                                await removeFromOutbox(item.localId);
+                                failed++;
+                                continue;
+                            }
+
+                            failed++;
+                            await updateOutboxItem(item.localId, {
+                                attempts: priorAttempts + 1,
+                                lastError: ZERO_ROW_MESSAGE
+                            });
+                            continue; // leave it queued (unless just dropped above), try again next sync
+                        }
                     } else {
                         // Unknown action - drop it rather than loop on it forever.
                         console.warn("Dropping outbox item with unknown action:", item);
