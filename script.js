@@ -161,6 +161,11 @@ function applyOwnerVisibility() {
     // just at login/role-refresh time.)
     let eventFormPanel = document.getElementById("eventFormPanel");
     if (eventFormPanel) eventFormPanel.style.display = owner ? "" : "none";
+
+    // TEMPORARY (Stage 6A): owner-only Send Test Push panel. Hidden in
+    // the HTML by default; only ever shown here. Remove with the panel.
+    let pushTestPanel = document.getElementById("pushTestPanel");
+    if (pushTestPanel) pushTestPanel.style.display = owner ? "" : "none";
 }
 
 /* =====================================================
@@ -425,6 +430,64 @@ async function testLocalNotification() {
         badge: "./icons/icon-192.png",
         data: { url: "./" }
     });
+}
+
+/* =====================================================
+   TEMPORARY (Stage 6A) - OWNER-ONLY "SEND TEST PUSH" BUTTON HANDLER
+   Invokes the already-deployed "push-test" Edge Function with the
+   existing authenticated Supabase session. Sends no recipient, no
+   payload, no keys. The function itself requires a valid JWT and only
+   ever targets the caller's own active subscription.
+   NOTE: a success result means only that the push service ACCEPTED the
+   request - NOT that the phone displayed a notification.
+   Remove this function, pushTestPanel in index.html, and the one line
+   in applyOwnerVisibility() when testing is finished.
+===================================================== */
+let pushTestInFlight = false;
+
+async function sendTestPush() {
+    if (!isOwner()) return;          // defensive: UI is already hidden for non-owners
+    if (pushTestInFlight) return;    // prevent duplicate simultaneous requests
+
+    const button = document.getElementById("pushTestButton");
+    const status = document.getElementById("pushTestStatus");
+    const setStatus = text => { if (status) status.innerText = text; };
+
+    if (!navigator.onLine) {
+        setStatus("❌ Push test failed: this device is offline.");
+        return;
+    }
+
+    pushTestInFlight = true;
+    if (button) button.disabled = true;
+    setStatus("Sending test push request...");
+
+    try {
+        const { data, error } = await supabaseClient.functions.invoke("push-test");
+
+        if (error) {
+            // Non-2xx: the function's JSON body carries a safe, plain-language
+            // message (it never contains secrets). Only that message is shown.
+            let message = "request failed.";
+            try {
+                if (error.context && typeof error.context.json === "function") {
+                    const body = await error.context.json();
+                    if (body && typeof body.error === "string") message = body.error;
+                }
+            } catch (_) { /* body unreadable - keep generic message */ }
+            setStatus("❌ Push test failed: " + message);
+        } else if (data && data.ok === true) {
+            setStatus("✅ Push request accepted — check your phone. (This does not prove it was displayed.)");
+        } else {
+            setStatus("❌ Push test failed: unexpected response.");
+        }
+    } catch (err) {
+        console.warn("Send test push failed:", err);
+        setStatus("❌ Push test failed: could not reach the server.");
+    } finally {
+        pushTestInFlight = false;
+        if (button) button.disabled = false;
+    }
 }
 
 
