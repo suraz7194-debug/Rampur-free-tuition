@@ -11,7 +11,7 @@
    on stale cached JS/CSS.
    ========================================================= */
 
-const CACHE_NAME = "rampur-free-tuition-v10";
+const CACHE_NAME = "rampur-free-tuition-v18";
 
 const APP_SHELL = [
     "./",
@@ -154,6 +154,65 @@ self.addEventListener("fetch", event => {
                 .catch(() => cached);
 
             return cached || networkFetch;
+        })
+    );
+});
+
+/* =========================================================
+   WEB PUSH NOTIFICATIONS (Stage 3 - client foundation only)
+
+   No server-side scheduler exists yet (that's a later stage) - this
+   only displays a notification if/when some future process sends a
+   real Web Push message to a subscription created in script.js.
+   With nothing sending pushes yet, these listeners simply never fire,
+   so adding them now cannot affect current app behavior.
+   ========================================================= */
+
+self.addEventListener("push", event => {
+
+    // Payload may be missing entirely, or present but not valid JSON -
+    // fall back to safe defaults in both cases rather than throwing.
+    let payload = {};
+    try {
+        payload = event.data ? event.data.json() : {};
+    } catch (err) {
+        payload = {};
+    }
+
+    const title = payload.title || "Rampur Free Tuition";
+    const options = {
+        body: payload.body || "",
+        icon: payload.icon || "./icons/icon-192.png",
+        badge: payload.badge || "./icons/icon-192.png",
+        data: payload.data || {}
+    };
+
+    event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", event => {
+
+    event.notification.close();
+
+    // Only ever navigate within this app's own scope - never an
+    // arbitrary external URL, even if one somehow ended up in the
+    // push payload's data.url.
+    let targetUrl = "./";
+    const dataUrl = event.notification.data && event.notification.data.url;
+    if (typeof dataUrl === "string" && dataUrl.startsWith("./")) {
+        targetUrl = dataUrl;
+    }
+
+    event.waitUntil(
+        clients.matchAll({ type: "window", includeUncontrolled: true }).then(clientList => {
+            for (const client of clientList) {
+                if ("focus" in client) {
+                    return client.focus();
+                }
+            }
+            if (clients.openWindow) {
+                return clients.openWindow(targetUrl);
+            }
         })
     );
 });
