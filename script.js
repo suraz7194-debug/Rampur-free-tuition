@@ -1481,6 +1481,10 @@ function showSection(id,button){
 
     renderAll();
 
+    // STAGE 7D: fetch/refresh absence alerts only when the Attendance
+    // section is actually opened, not on every section switch.
+    if (id === "attendance") loadAbsenceAlerts();
+
 }
 
 
@@ -6584,3 +6588,218 @@ window.addEventListener("load", function(){
 
 });
 // (offline database v1 removed - offline-core.js + initApp()/syncNow() at the top of this file now own this)
+
+
+/* =====================================================
+   STAGE 7D - ABSENCE ALERTS UI (Attendance section)
+
+   Reads/updates the existing "absence_alerts" table only. Does not
+   create alerts, does not call the notification engine or sender, and
+   never touches notification_logs / notification_settings / attendance.
+   RLS (Owner/Teacher SELECT+UPDATE, set up in Stage 2) is the real
+   security boundary; nothing here assumes otherwise.
+===================================================== */
+
+let absenceAlerts = [];
+let absenceAlertsLoading = false;
+let absenceAlertsLoadError = null;
+let absenceAlertsFilter = "open";           // 'open' | 'pending' | 'not_informed' | 'resolved'
+let absenceAlertsHistoryVisible = false;
+const absenceAlertResponseInFlight = new Set();
+
+function absenceAlertStatusLabel(status) {
+    if (status === "pending") return "Pending";
+    if (status === "informed") return "Informed";
+    if (status === "not_informed") return "Not Informed";
+    if (status === "resolved") return "Resolved";
+    return status ? String(status) : "Unknown";
+}
+
+/* `studentList` is injected (defaults to the app's global `students`)
+   so this stays a pure, independently testable function. */
+function lookupStudentName(studentId, studentList) {
+    const list = studentList || (typeof students !== "undefined" ? students : []);
+    const s = Array.isArray(list) ? list.find(x => x && x.id === studentId) : null;
+    return (s && s.name) ? s.name : "Unknown student";
+}
+
+function filterAbsenceAlerts(alerts, filter) {
+    const list = Array.isArray(alerts) ? alerts : [];
+    if (filter === "pending") return list.filter(a => a && a.status === "pending");
+    if (filter === "not_informed") return list.filter(a => a && a.status === "not_informed");
+    if (filter === "resolved") return list.filter(a => a && a.status === "resolved");
+    // 'open' = not yet resolved (matches the engine/sender's OPEN_STATUSES),
+    // so an already-informed alert stays visible instead of vanishing until
+    // the engine eventually resolves it.
+    return list.filter(a => a && (a.status === "pending" || a.status === "informed" || a.status === "not_informed"));
+}
+
+function absenceAlertConfirmedLine(alert) {
+    if (!alert.confirmed_by || !alert.confirmed_at) return "";
+    const who = String(alert.confirmed_by).slice(0, 8) + "…";
+    let when = alert.confirmed_at;
+    try { when = formatEventDate(String(alert.confirmed_at).slice(0, 10)) + " " + new Date(alert.confirmed_at).toLocaleTimeString(); }
+    catch (_) { /* keep raw value */ }
+    return '<p class="small">Confirmed by: ' + escapeHTML(who) + '<br>Confirmed at: ' + escapeHTML(when) + "</p>";
+}
+
+/* Builds one alert card's HTML. `isHistory` suppresses the response
+   buttons even for a (should-never-happen) open-status row rendered
+   into the resolved-history list. */
+function buildAbsenceAlertCardHTML(alert, studentName, isHistory) {
+    const count = Number.isFinite(Number(alert.absent_count)) ? Number(alert.absent_count) : 0;
+    const started = formatEventDate(alert.absence_start_date);
+    const last = formatEventDate(alert.last_absent_date);
+    const statusLabel = absenceAlertStatusLabel(alert.status);
+    const isOpen = !isHistory && (alert.status === "pending" || alert.status === "not_informed");
+
+    const followUpNote = alert.status === "not_informed"
+        ? '<p class="small">Remains eligible for future follow-up.</p>' : "";
+
+    const actions = isOpen
+        ? '<button class="btn" onclick="respondToAbsenceAlert(\'' + escapeHTML(alert.id) + '\',\'informed\')">✅ Informed</button> ' +
+          '<button class="btn" onclick="respondToAbsenceAlert(\'' + escapeHTML(alert.id) + '\',\'not_informed\')">❌ Not Informed</button>'
+        : "";
+
+    return '' +
+        '<div class="panel absence-alert-card" data-alert-id="' + escapeHTML(alert.id) + '" data-status="' + escapeHTML(alert.status) + '">' +
+            "<h4>⚠️ " + escapeHTML(studentName) + "</h4>" +
+            "<p>" + count + " consecutive absences</p>" +
+            '<p class="small">Started: ' + escapeHTML(started) + "<br>Last absent: " + escapeHTML(last) + "</p>" +
+            '<p class="small">Status: ' + escapeHTML(statusLabel) + "</p>" +
+            absenceAlertConfirmedLine(alert) +
+            followUpNote +
+            actions +
+        "</div>";
+}
+
+async function loadAbsenceAlerts() {
+    if (absenceAlertsLoading) return;
+    absenceAlertsLoading = true;
+    absenceAlertsLoadError = null;
+    renderAbsenceAlerts();
+
+    try {
+        const { data, error } = await supabaseClient
+            .from("absence_alerts")
+            .select("id,student_id,absence_start_date,last_absent_date,absent_count,status,notification_count,last_notified_at,confirmed_by,confirmed_at,created_at,updated_at")
+            .order("updated_at", { ascending: false });
+        if (error) throw error;
+        absenceAlerts = Array.isArray(data) ? data : [];
+    } catch (err) {
+        console.warn("Could not load absence alerts:", err);
+        absenceAlertsLoadError = navigator.onLine
+            ? "Could not load absence alerts."
+            : "Offline — showing the last loaded absence alerts, if any.";
+    } finally {
+        absenceAlertsLoading = false;
+        renderAbsenceAlerts();
+    }
+}
+
+function setAbsenceAlertsFilter(filter) {
+    absenceAlertsFilter = filter;
+    renderAbsenceAlerts();
+}
+
+function toggleAbsenceAlertsHistory() {
+    absenceAlertsHistoryVisible = !absenceAlertsHistoryVisible;
+    renderAbsenceAlerts();
+}
+
+function renderAbsenceAlerts() {
+    const listEl = document.getElementById("absenceAlertsList");
+    if (!listEl) return;   // Attendance section not in this page build - defensive no-op
+
+    if (absenceAlertsLoading) {
+        listEl.innerHTML = '<p class="small">Loading absence alerts…</p>';
+    } else if (absenceAlertsLoadError && absenceAlerts.length === 0) {
+        listEl.innerHTML = "<p class=\"small\">" + escapeHTML(absenceAlertsLoadError) + "</p>";
+    } else {
+        const shown = filterAbsenceAlerts(absenceAlerts, absenceAlertsFilter);
+        listEl.innerHTML = shown.length
+            ? shown.map(a => buildAbsenceAlertCardHTML(a, lookupStudentName(a.student_id))).join("")
+            : '<p class="small">No active absence alerts.</p>';
+    }
+
+    const filterButtons = {
+        open: document.getElementById("absenceAlertsFilterOpen"),
+        pending: document.getElementById("absenceAlertsFilterPending"),
+        not_informed: document.getElementById("absenceAlertsFilterNotInformed")
+    };
+    Object.keys(filterButtons).forEach(key => {
+        const btn = filterButtons[key];
+        if (btn) btn.classList.toggle("active", absenceAlertsFilter === key);
+    });
+
+    const historyPanel = document.getElementById("absenceAlertsHistoryPanel");
+    const historyToggle = document.getElementById("absenceAlertsHistoryToggle");
+    if (historyToggle) historyToggle.textContent = absenceAlertsHistoryVisible ? "Hide Resolved History" : "Show Resolved History";
+    if (historyPanel) {
+        historyPanel.style.display = absenceAlertsHistoryVisible ? "" : "none";
+        if (absenceAlertsHistoryVisible) {
+            const historyList = document.getElementById("absenceAlertsHistoryList");
+            if (historyList) {
+                const resolved = filterAbsenceAlerts(absenceAlerts, "resolved");
+                historyList.innerHTML = resolved.length
+                    ? resolved.map(a => buildAbsenceAlertCardHTML(a, lookupStudentName(a.student_id), true)).join("")
+                    : '<p class="small">No resolved absence episodes yet.</p>';
+            }
+        }
+    }
+
+    // Responding needs connectivity (no parallel offline sync queue for this table -
+    // see Stage 7D notes); viewing already-loaded alerts still works offline.
+    if (!navigator.onLine) {
+        listEl.querySelectorAll("button").forEach(b => {
+            b.disabled = true;
+            b.title = "Requires internet connection to respond.";
+        });
+    }
+}
+
+/* Only ever sets 'informed' or 'not_informed' - never 'resolved' (that
+   belongs solely to the Stage 7B engine) and never touches absent_count /
+   notification_count / last_notified_at. The update itself is the atomic
+   safety net: .eq("id", alertId).in("status", OPEN) only succeeds if the
+   row is still open, so two concurrent responses can't silently overwrite
+   one another - whichever commits second sees 0 rows changed. */
+async function respondToAbsenceAlert(alertId, newStatus) {
+    if (newStatus !== "informed" && newStatus !== "not_informed") return;
+    if (!currentUserId) { alert("Please log in first."); return; }
+    if (!navigator.onLine) { alert("Requires internet connection to respond."); return; }
+    if (absenceAlertResponseInFlight.has(alertId)) return;
+    absenceAlertResponseInFlight.add(alertId);
+
+    try {
+        const { data: current, error: readErr } = await supabaseClient
+            .from("absence_alerts").select("id,status").eq("id", alertId).maybeSingle();
+
+        if (readErr) { alert("Could not check this alert's current status. Please try again."); return; }
+        if (!current) { alert("This alert no longer exists."); await loadAbsenceAlerts(); return; }
+        if (current.status !== "pending" && current.status !== "not_informed") {
+            alert("This alert has already changed (now: " + absenceAlertStatusLabel(current.status) + "). Showing the latest state.");
+            await loadAbsenceAlerts();
+            return;
+        }
+
+        const nowIso = new Date().toISOString();
+        const { data: updated, error: updErr } = await supabaseClient
+            .from("absence_alerts")
+            .update({ status: newStatus, confirmed_by: currentUserId, confirmed_at: nowIso })
+            .eq("id", alertId)
+            .in("status", ["pending", "not_informed"])
+            .select("id");
+
+        if (updErr) { alert("Could not save your response. Please try again."); return; }
+        if (!updated || updated.length === 0) {
+            alert("Someone else already responded to this alert. Showing the latest state.");
+        }
+        await loadAbsenceAlerts();
+    } catch (err) {
+        console.warn("Absence alert response failed:", err);
+        alert("Could not save your response. Please try again.");
+    } finally {
+        absenceAlertResponseInFlight.delete(alertId);
+    }
+}
