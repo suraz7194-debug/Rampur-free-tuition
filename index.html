@@ -929,6 +929,37 @@ onclick="runAbsencePushTest()">
 
 <h2>Daily Attendance</h2>
 
+
+<!-- =========================
+     STAGE 7D: ABSENCE ALERTS
+     Reads/updates the existing absence_alerts table only.
+     Alerts are created/resolved by the server-side engine, not here.
+========================= -->
+
+<div class="panel" id="absenceAlertsPanel">
+
+<h3>⚠️ Absence Alerts</h3>
+
+<div class="group-buttons">
+<button class="btn" id="absenceAlertsFilterOpen" onclick="setAbsenceAlertsFilter('open')">All Open</button>
+<button class="btn" id="absenceAlertsFilterPending" onclick="setAbsenceAlertsFilter('pending')">Pending</button>
+<button class="btn" id="absenceAlertsFilterNotInformed" onclick="setAbsenceAlertsFilter('not_informed')">Not Informed</button>
+</div>
+
+<div id="absenceAlertsList">
+<p class="small">Loading absence alerts…</p>
+</div>
+
+<button class="btn" id="absenceAlertsHistoryToggle" onclick="toggleAbsenceAlertsHistory()" style="margin-top:10px;">Show Resolved History</button>
+
+<div id="absenceAlertsHistoryPanel" style="display:none; margin-top:10px;">
+<h4>Resolved Episodes</h4>
+<div id="absenceAlertsHistoryList"></div>
+</div>
+
+</div>
+
+
 <div class="panel">
 
 <div class="month-box">
@@ -1743,4 +1774,4 @@ if ("serviceWorker" in navigator) {
   </script>
   
 </body>
-          </html>
+      </html>
