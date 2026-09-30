@@ -960,31 +960,6 @@ onclick="runAbsencePushTest()">
 </div>
 
 
-<!-- =========================
-     TEMPORARY (live verification of Stage 7D only): OWNER-ONLY UI TEST TOOLS
-     Hidden by default; shown only by applyOwnerVisibility().
-     Creates/resolves/deletes ONE synthetic absence_alerts row at a time
-     against a real existing student. Never sends a push. Remove this whole
-     panel together with the matching block in script.js when finished.
-========================= -->
-
-<div class="panel" id="absenceUITestPanel" style="display:none;">
-
-<h3>🧪 UI Test Tools (temporary, owner only)</h3>
-
-<p class="small">Creates a synthetic absence alert (dates 2000-01-01 / 2000-01-07, so it can never be mistaken for a real one) against an existing real student, to test this screen only. No push notification is ever sent by these tools.</p>
-
-<button class="btn" id="absenceUITestCreateButton" onclick="createAbsenceUITestAlert()">🧪 Create UI Test Alert</button>
-<button class="btn" id="absenceUITestVerifyButton" onclick="verifyAbsenceUITestClean()">🔍 Verify Clean</button>
-<button class="btn" onclick="deleteAllAbsenceUITestAlerts()">🧹 Delete All Tracked Test Alerts</button>
-
-<div id="absenceUITestList"></div>
-
-<p class="small" id="absenceUITestStatus"></p>
-
-</div>
-
-
 <div class="panel">
 
 <div class="month-box">
@@ -1799,4 +1774,4 @@ if ("serviceWorker" in navigator) {
   </script>
   
 </body>
-  </html>
+          </html>
