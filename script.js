@@ -742,7 +742,34 @@ async function adminLogin() {
     }
 }
 
-function adminLogout() {
+async function adminLogout() {
+    // Stage 8C: block logout while a Finance write made offline hasn't
+    // synced yet. Finance is excluded from the generic IndexedDB pull
+    // (see offline-core.js), so once this device logs out there is no
+    // other session that can push a pending Finance outbox entry - RLS
+    // correctly rejects it under any other account, and it would just
+    // retry forever. Checked first, before anything below is touched, so
+    // a blocked logout leaves the session completely untouched. Ordinary
+    // pending entries for every other table are intentionally NOT
+    // checked here; they're expected to survive a logout/login cycle.
+    try {
+        const pending = await RFT.getPendingOutbox();
+        const pendingFinance = pending.filter(item => item.table === "finance");
+        if (pendingFinance.length > 0) {
+            alert(
+                navigator.onLine
+                    ? "You have unsynced Finance changes. Please sync while logged in as Owner before logging out."
+                    : "You have unsynced Finance changes and this device is offline. Logout is blocked until you reconnect and those changes sync."
+            );
+            return;
+        }
+    } catch (err) {
+        // Couldn't check the outbox (e.g. IndexedDB unavailable) - fail
+        // safe by allowing the existing logout behavior to proceed rather
+        // than trapping the user in a session they can't exit.
+        console.warn("Could not check for pending Finance outbox entries before logout:", err);
+    }
+
     // Best-effort, non-blocking - see doc comment on the function itself.
     deactivateCurrentDeviceSubscriptionOnLogout(currentUserId);
 
@@ -5332,9 +5359,13 @@ async function exportData(){
                 .select("*")
                 .order("id", { ascending: true }),
 
-            // Finance is owner-only - a non-owner session doesn't even
-            // attempt this query (RLS should also block it once locked
-            // down, but this stops it being requested at all right now).
+            // Finance is owner-only. Supabase RLS already enforces this at
+            // the database level (finance has an Owner-only policy and no
+            // policy at all for any other role), so a Teacher session is
+            // blocked server-side regardless of this check. This isOwner()
+            // check is defense-in-depth / UI gating on top of that - it
+            // just avoids a non-owner session requesting data it can't
+            // read anyway, not the thing keeping it out.
             isOwner()
                 ? supabaseClient.from("finance").select("*")
                 : Promise.resolve({ data: [], error: null }),
@@ -5577,10 +5608,13 @@ async function importData(){
                 throw response.error;
 
 
-            // Finance is owner-only - a non-owner session doesn't touch
-            // it at all during restore (RLS should also block this once
-            // locked down, but this stops it being attempted at all
-            // right now).
+            // Finance is owner-only. Supabase RLS already enforces this at
+            // the database level (finance has an Owner-only policy and no
+            // policy at all for any other role), so a Teacher session
+            // can't touch it server-side regardless of this check. This
+            // isOwner() check is defense-in-depth / UI gating on top of
+            // that - it just avoids a non-owner session attempting a
+            // restore step it can't do anyway, not the thing preventing it.
             if(isOwner()){
                 response =
                     await supabaseClient
