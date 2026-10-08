@@ -5575,264 +5575,28 @@ async function importData(){
 
 
             /* =========================
-               DELETE OLD DATA
+               RESTORE (single atomic transaction)
+
+               Stage 8D-2: the destructive multi-request delete/insert
+               sequence that used to live here has been replaced by one
+               call to the server-side "restore_backup" RPC (created and
+               verified in Stage 8D-1). That function performs the exact
+               same delete+insert sequence across all eight tables, but
+               as ONE PostgreSQL transaction: on any failure, Postgres
+               itself rolls back everything the function did - nothing
+               partial can ever remain. Owner-only access and Finance's
+               owner-only protection are enforced the same way they
+               always were: by RLS, evaluated against the real caller,
+               since the RPC runs as SECURITY INVOKER (not DEFINER).
+               This function does not - and must not - attempt its own
+               rollback/retry/fallback here; the RPC already owns that
+               guarantee.
                ========================= */
 
-            let response =
-                await supabaseClient
-                .from("results")
-                .delete()
-                .not("id", "is", null);
+            let { data: restoreResult, error: restoreError } =
+                await supabaseClient.rpc("restore_backup", { payload: data });
 
-            if(response.error)
-                throw response.error;
-
-
-            response =
-                await supabaseClient
-                .from("attendance")
-                .delete()
-                .not("id", "is", null);
-
-            if(response.error)
-                throw response.error;
-
-
-            response =
-                await supabaseClient
-                .from("fees")
-                .delete()
-                .not("id", "is", null);
-
-            if(response.error)
-                throw response.error;
-
-
-            // Finance is owner-only. Supabase RLS already enforces this at
-            // the database level (finance has an Owner-only policy and no
-            // policy at all for any other role), so a Teacher session
-            // can't touch it server-side regardless of this check. This
-            // isOwner() check is defense-in-depth / UI gating on top of
-            // that - it just avoids a non-owner session attempting a
-            // restore step it can't do anyway, not the thing preventing it.
-            if(isOwner()){
-                response =
-                    await supabaseClient
-                    .from("finance")
-                    .delete()
-                    .not("id", "is", null);
-
-                if(response.error)
-                    throw response.error;
-            }
-
-
-            response =
-                await supabaseClient
-                .from("exams")
-                .delete()
-                .not("id", "is", null);
-
-            if(response.error)
-                throw response.error;
-
-
-            /* Delete old events/notices */
-            response =
-                await supabaseClient
-                .from("events")
-                .delete()
-                .not("id", "is", null);
-
-            if(response.error)
-                throw response.error;
-
-
-            response =
-                await supabaseClient
-                .from("students")
-                .delete()
-                .not("id", "is", null);
-
-            if(response.error)
-                throw response.error;
-
-
-            /* Delete old groups */
-            response =
-                await supabaseClient
-                .from("groups")
-                .delete()
-                .not("id", "is", null);
-
-            if(response.error)
-                throw response.error;
-
-
-            /* =========================
-               RESTORE GROUPS
-               ========================= */
-
-            if(data.groups.length > 0){
-
-                let groupRows =
-                    data.groups.map(group => {
-
-                        /*
-                         * If backup contains full
-                         * Supabase group rows,
-                         * keep only the name.
-                         *
-                         * New IDs will be generated
-                         * automatically.
-                         */
-
-                        return {
-                            name:
-                                typeof group === "string"
-                                    ? group
-                                    : group.name
-                        };
-
-                    });
-
-                response =
-                    await supabaseClient
-                    .from("groups")
-                    .insert(
-                        groupRows
-                    );
-
-                if(response.error)
-                    throw response.error;
-            }
-
-
-            /* =========================
-               RESTORE STUDENTS
-               ========================= */
-
-            if(data.students.length > 0){
-
-                response =
-                    await supabaseClient
-                    .from("students")
-                    .insert(
-                        data.students
-                    );
-
-                if(response.error)
-                    throw response.error;
-            }
-
-
-            /* =========================
-               RESTORE EXAMS
-               ========================= */
-
-            if(data.exams.length > 0){
-
-                response =
-                    await supabaseClient
-                    .from("exams")
-                    .insert(
-                        data.exams
-                    );
-
-                if(response.error)
-                    throw response.error;
-            }
-
-
-            /* =========================
-               RESTORE ATTENDANCE
-               ========================= */
-
-            if(data.attendance.length > 0){
-
-                response =
-                    await supabaseClient
-                    .from("attendance")
-                    .insert(
-                        data.attendance
-                    );
-
-                if(response.error)
-                    throw response.error;
-            }
-
-
-            /* =========================
-               RESTORE FEES
-               ========================= */
-
-            if(data.fees.length > 0){
-
-                response =
-                    await supabaseClient
-                    .from("fees")
-                    .insert(
-                        data.fees
-                    );
-
-                if(response.error)
-                    throw response.error;
-            }
-
-
-            /* =========================
-               RESTORE RESULTS
-               ========================= */
-
-            if(data.results.length > 0){
-
-                response =
-                    await supabaseClient
-                    .from("results")
-                    .insert(
-                        data.results
-                    );
-
-                if(response.error)
-                    throw response.error;
-            }
-
-
-            /* =========================
-               RESTORE FINANCIAL RECORDS
-               (owner-only - see the delete step above for why)
-               ========================= */
-
-            if(isOwner() && data.finance.length > 0){
-
-                response =
-                    await supabaseClient
-                    .from("finance")
-                    .insert(
-                        data.finance
-                    );
-
-                if(response.error)
-                    throw response.error;
-            }
-
-
-            /* =========================
-               RESTORE EVENTS & NOTICES
-               ========================= */
-
-            if(data.events.length > 0){
-
-                response =
-                    await supabaseClient
-                    .from("events")
-                    .insert(
-                        data.events
-                    );
-
-                if(response.error)
-                    throw response.error;
-            }
+            if (restoreError) throw restoreError;
 
 
             /* =========================
@@ -5879,7 +5643,7 @@ async function importData(){
             );
 
             alert(
-                "❌ Restore failed.\n\n" +
+                "❌ Restore failed. No changes were committed because the restore is atomic.\n\n" +
                 error.message +
                 "\n\n" +
                 "Check the browser console for details."
