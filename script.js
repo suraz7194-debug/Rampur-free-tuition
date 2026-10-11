@@ -1039,13 +1039,41 @@ function examToRow(e) {
 
 /* ---------- building the display caches from raw arrays ---------- */
 
+/* Stage 8H-5a: does attendance row `a` beat row `b`? Mirrors the server
+   trigger's ordering key (updated_at, then present over absent, then status
+   text) so the screen shows what the server will keep. */
+function attendanceRowWins(a, b) {
+    const ta = Date.parse(a.updated_at);
+    const tb = Date.parse(b.updated_at);
+    const na = isNaN(ta) ? 0 : ta;
+    const nb = isNaN(tb) ? 0 : tb;
+    if (na !== nb) return na > nb;
+    const pa = a.status === "present";
+    const pb = b.status === "present";
+    if (pa !== pb) return pa;
+    return String(a.status) > String(b.status);
+}
+
 function rebuildAttendanceCache(rows) {
     attendance = {};
     attendanceIds = {};
+
+    // Stage 8H-5a: if the local store holds more than one row for the same
+    // student/date (e.g. a pending row with a different id next to the
+    // server's canonical row), show the one the server would keep instead of
+    // whichever happens to come last in IndexedDB key order. With exactly one
+    // row per student/date this behaves exactly as before.
+    const chosen = {};
     rows.forEach(row => {
+        const key = row.date + "|" + row.student_id;
+        if (!chosen[key] || attendanceRowWins(row, chosen[key])) chosen[key] = row;
+    });
+
+    Object.keys(chosen).forEach(key => {
+        const row = chosen[key];
         if (!attendance[row.date]) attendance[row.date] = {};
         attendance[row.date][row.student_id] = row.status;
-        attendanceIds[row.date + "|" + row.student_id] = row.id;
+        attendanceIds[key] = row.id;
     });
 }
 
@@ -1207,6 +1235,58 @@ async function loadAllFromLocal() {
    partial failure can be told apart from a full sync.
 ===================================================== */
 
+/* Stage 8H-5a (attendance only): the server keeps ONE row per student/date
+   and its id is canonical. A device can hold a pending local edit under a
+   different random id (L) for a pair the server already has as C. This moves
+   such pending edits onto C - same status, same original updated_at, still
+   pending, local row and outbox item changed together in one transaction -
+   so the local store ends up with one row per pair and the server copy can no
+   longer sit next to (or overwrite) the pending edit. Nothing is ever dropped:
+   distinct pending edits that end up sharing C are all kept (the server's
+   ordering rule picks the winner when they are sent).
+   Returns the set of pending attendance record ids AFTER reconciliation,
+   read fresh so edits queued while the pull request was in flight count. */
+async function reconcileAttendanceWithServer(serverRows) {
+    const canonicalByPair = new Map();
+    serverRows.forEach(r => canonicalByPair.set(r.student_id + "|" + r.date, r));
+
+    if (typeof RFT.rekeyPendingRecord === "function") {
+        const pending = await RFT.getPendingOutbox();
+        for (const item of pending) {
+            if (item.table !== "attendance" || item.action !== "upsert") continue;
+            if (!item.record || !item.record.id) continue;
+            const canonical = canonicalByPair.get(item.record.student_id + "|" + item.record.date);
+            if (!canonical || canonical.id === item.record.id) continue;
+            try {
+                await RFT.rekeyPendingRecord(
+                    "attendance", item.localId, item.record.id, canonical.id,
+                    { preferExisting: (moved, current) => !attendanceRowWins(moved, current) }
+                );
+            } catch (err) {
+                // Leave the item exactly as it was; the display rule in
+                // rebuildAttendanceCache still shows a single value.
+                console.error("Could not reconcile pending attendance with the canonical id:", err);
+            }
+        }
+    }
+
+    const pendingIds = new Set();
+    const owners = {};
+    (await RFT.getPendingOutbox()).forEach(item => {
+        if (!item.record || !item.record.id) return;
+        if (item.table !== "attendance") return;
+        pendingIds.add(item.record.id);
+        if (item.action === "upsert") owners[item.record.id] = (owners[item.record.id] || 0) + 1;
+    });
+    Object.keys(owners).forEach(id => {
+        if (owners[id] > 1) {
+            console.warn("Attendance " + id + " has " + owners[id] +
+                " distinct pending edits; all are kept and the server's ordering rule decides.");
+        }
+    });
+    return pendingIds;
+}
+
 async function pullAllFromSupabase() {
     let allOk = true;
 
@@ -1239,8 +1319,15 @@ async function pullAllFromSupabase() {
             continue; // keep whatever is already cached locally for this table
         }
 
-        const pendingIds = pendingIdsByTable[table] || new Set();
+        let pendingIds = pendingIdsByTable[table] || new Set();
         const serverRows = data || [];
+
+        // Stage 8H-5a: attendance only - adopt the server's canonical ids for
+        // pending edits and refresh the pending set (see above).
+        if (table === "attendance") {
+            pendingIds = await reconcileAttendanceWithServer(serverRows);
+        }
+
         const serverIds = new Set(serverRows.map(r => r.id));
 
         // Rows still waiting to sync up keep their local version - don't
@@ -2964,8 +3051,40 @@ async function toggleAttendance(studentId, date) {
     const row = { id, student_id: studentId, date, status: newStatus, updated_at: new Date().toISOString() };
 
     // 1. Local-first: write to IndexedDB + in-memory immediately - works offline.
-    await RFT.put("attendance", row);
-    await RFT.enqueue("attendance", "upsert", row);
+    if (typeof RFT.putAndEnqueue === "function") {
+        // Stage 8H-5a: one IndexedDB transaction - the row and its outbox
+        // entry are saved together or not at all.
+        //
+        // The id is re-checked INSIDE that transaction: if a pending attendance
+        // edit already exists for this student/date under a different id (e.g.
+        // pull reconciliation just moved it to the server's canonical id while
+        // attendanceIds still held the old one), this toggle is written under
+        // that pending item's id instead of creating a second row + item. The
+        // new row is always the newest edit; it only replaces/coalesces into
+        // that item and never touches other pending items.
+        let savedRow = row;
+        await RFT.putAndEnqueue("attendance", row, "attendance", "upsert", {
+            resolveRow: (pendingItems, r) => {
+                let best = null;
+                pendingItems.forEach(item => {
+                    const rec = item.record;
+                    if (item.action !== "upsert" || !rec) return;
+                    if (rec.student_id !== r.student_id || rec.date !== r.date) return;
+                    if (!best || attendanceRowWins(rec, best)) best = rec;
+                });
+                if (!best || best.id === r.id) return r;
+                savedRow = Object.assign({}, r, { id: best.id });
+                return savedRow;
+            }
+        });
+        attendanceIds[date + "|" + studentId] = savedRow.id;
+    } else {
+        // Older cached offline-core.js without putAndEnqueue: queue FIRST so a
+        // crash between the two steps leaves a queued edit (which sync keeps)
+        // rather than an unqueued local row (which a later pull would delete).
+        await RFT.enqueue("attendance", "upsert", row);
+        await RFT.put("attendance", row);
+    }
     saveAll();
 
     // If this row was reached via the search box, clear the search after
