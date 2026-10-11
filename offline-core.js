@@ -262,51 +262,152 @@
        before you're back online still only sends one upsert.
        ===================================================== */
 
-    async function enqueue(table, action, record) {
-        const db = await openDB();
+    /* ---- Stage 8H-5a: atomic outbox helpers -------------------------------
 
-        // Look for an existing pending item for this exact record so we
-        // can coalesce instead of appending a duplicate.
-        const existing = (await getPendingOutbox())
-            .filter(i => i.table === table && i.record && record && i.record.id === record.id);
+       Every read-modify-write of the outbox now happens inside ONE IndexedDB
+       readwrite transaction. IndexedDB serialises readwrite transactions on
+       the same object store, so no other enqueue / compare-and-delete /
+       update can interleave between the read and the write.
+       ----------------------------------------------------------------------- */
 
-        if (action === "upsert") {
-            const existingUpsert = existing.find(i => i.action === "upsert");
-            if (existingUpsert) {
-                // Same record, still queued, not yet synced - just replace
-                // the payload with the latest version rather than queuing
-                // another full round trip for it.
-                await updateOutboxItem(existingUpsert.localId, {
-                    record,
-                    lastError: null
-                });
-                return existingUpsert.localId;
-            }
+    // Deterministic text form of a JSON-like value (object keys sorted
+    // recursively) so two copies of the same content always compare equal.
+    function stableStringify(value) {
+        if (value === null || typeof value !== "object") {
+            return JSON.stringify(value === undefined ? null : value);
         }
-
-        if (action === "delete") {
-            // Nothing to upsert if it's about to be deleted anyway - and
-            // no need to delete twice.
-            for (const item of existing) {
-                await removeFromOutbox(item.localId);
-            }
+        if (Array.isArray(value)) {
+            return "[" + value.map(stableStringify).join(",") + "]";
         }
+        return "{" + Object.keys(value).sort().map(k =>
+            JSON.stringify(k) + ":" + stableStringify(value[k])
+        ).join(",") + "}";
+    }
 
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction("outbox", "readwrite");
-            const store = tx.objectStore("outbox");
-            const item = {
+    // Everything about a queued item that changes WHAT would be written:
+    // table, action, the full record (every field) and a revision counter
+    // (bumped on every coalesce / re-key, so even an edit that happens to
+    // produce identical record content is still detected as "changed").
+    // attempts / lastError / createdAt are bookkeeping and deliberately excluded.
+    function outboxFingerprint(item) {
+        if (!item) return null;
+        return stableStringify({
+            table: item.table,
+            action: item.action,
+            rev: item.rev || 0,
+            record: item.record
+        });
+    }
+
+    // The body of enqueue(), working on an already-open readwrite "outbox"
+    // object store so the CALLER decides the transaction boundary (enqueue()
+    // uses the outbox alone; putAndEnqueue() adds the data row to the same
+    // transaction). Behaviour is unchanged from the previous enqueue():
+    // coalesce a pending upsert for the same record, drop superseded items
+    // before queueing a delete, otherwise append a new pending item.
+    function enqueueInStore(outboxStore, table, action, record, onDone) {
+        const readReq = outboxStore.getAll();
+        readReq.onsuccess = () => {
+            const existing = (readReq.result || [])
+                .filter(i => i.status === "pending")
+                .sort((a, b) => a.createdAt - b.createdAt)
+                .filter(i => i.table === table && i.record && record && i.record.id === record.id);
+
+            if (action === "upsert") {
+                const existingUpsert = existing.find(i => i.action === "upsert");
+                if (existingUpsert) {
+                    // Same record, still queued, not yet synced - replace the
+                    // payload with the latest version rather than queuing
+                    // another full round trip for it. rev++ lets an in-flight
+                    // request for the OLD payload see that this item changed.
+                    existingUpsert.record = record;
+                    existingUpsert.lastError = null;
+                    existingUpsert.rev = (existingUpsert.rev || 0) + 1;
+                    outboxStore.put(existingUpsert);
+                    onDone(existingUpsert.localId);
+                    return;
+                }
+            }
+
+            if (action === "delete") {
+                // Nothing to upsert if it's about to be deleted anyway - and
+                // no need to delete twice.
+                for (const item of existing) {
+                    outboxStore.delete(item.localId);
+                }
+            }
+
+            const addReq = outboxStore.add({
                 table,
                 action,          // 'upsert' | 'delete'
                 record,          // full row for upsert, { id } for delete
                 status: "pending",
                 attempts: 0,
                 lastError: null,
-                createdAt: Date.now()
+                createdAt: Date.now(),
+                rev: 0
+            });
+            addReq.onsuccess = () => onDone(addReq.result);
+        };
+    }
+
+    async function enqueue(table, action, record) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction("outbox", "readwrite");
+            let localId;
+            enqueueInStore(tx.objectStore("outbox"), table, action, record, id => { localId = id; });
+            tx.oncomplete = () => resolve(localId);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error("Outbox transaction aborted"));
+        });
+    }
+
+    // Write a data row AND queue it for sync in ONE transaction: either both
+    // are saved or neither is. This closes the old crash window where a row
+    // was written locally (put) but the app died before it was queued
+    // (enqueue) - a later pull would then delete that unqueued row.
+    //
+    // Optional 5th argument { resolveRow(pendingItems, row) }: called INSIDE
+    // the transaction, before anything is written, with the table's pending
+    // outbox items as they are right now. It may return a replacement row
+    // (e.g. the same edit under a different id). Because it runs in the same
+    // transaction, no other transaction (such as a re-key) can change the
+    // outbox between its look-up and the write. If it is omitted, returns
+    // nothing, or throws, the row is written exactly as given.
+    async function putAndEnqueue(storeName, row, table, action, options) {
+        const resolveRow = options && typeof options.resolveRow === "function" ? options.resolveRow : null;
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction([storeName, "outbox"], "readwrite");
+            const outbox = tx.objectStore("outbox");
+            const tableName = table || storeName;
+            let localId;
+            const save = finalRow => {
+                tx.objectStore(storeName).put(finalRow);
+                enqueueInStore(outbox, tableName, action || "upsert", finalRow, id => { localId = id; });
             };
-            const req = store.add(item);
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => reject(req.error);
+            if (!resolveRow) {
+                save(row);
+            } else {
+                const pendingReq = outbox.getAll();
+                pendingReq.onsuccess = () => {
+                    let finalRow = row;
+                    try {
+                        const pending = (pendingReq.result || [])
+                            .filter(i => i.status === "pending" && i.table === tableName && i.record);
+                        const replaced = resolveRow(pending, row);
+                        if (replaced && typeof replaced === "object") finalRow = replaced;
+                    } catch (err) {
+                        console.warn("putAndEnqueue resolveRow failed; writing the row as given:", err);
+                        finalRow = row;
+                    }
+                    save(finalRow);
+                };
+            }
+            tx.oncomplete = () => resolve(localId);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error("Outbox transaction aborted"));
         });
     }
 
@@ -321,11 +422,112 @@
         await remove("outbox", localId);
     }
 
+    // Same behaviour as before (merge `updates` into the stored item; no-op if
+    // the item is gone) but the read and the write are ONE transaction, so a
+    // concurrent coalescing enqueue cannot be overwritten with a stale copy.
     async function updateOutboxItem(localId, updates) {
-        const item = await get("outbox", localId);
-        if (!item) return;
-        Object.assign(item, updates);
-        await put("outbox", item);
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction("outbox", "readwrite");
+            const store = tx.objectStore("outbox");
+            const req = store.get(localId);
+            req.onsuccess = () => {
+                const item = req.result;
+                if (!item) return;
+                Object.assign(item, updates);
+                if (updates && Object.prototype.hasOwnProperty.call(updates, "record")) {
+                    item.rev = (item.rev || 0) + 1;
+                }
+                store.put(item);
+            };
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error("Outbox transaction aborted"));
+        });
+    }
+
+    // Remove an outbox item ONLY IF it is still exactly what was sent.
+    // read + compare + delete happen in one readwrite transaction, so an edit
+    // coalesced into the item while its request was in flight can never be
+    // deleted by that older request succeeding. Resolves to
+    //   "removed"  - unchanged, deleted
+    //   "changed"  - modified during the request, KEPT pending
+    //   "gone"     - already removed by something else
+    async function removeOutboxIfUnchanged(localId, sentItem) {
+        const expected = outboxFingerprint(sentItem);
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction("outbox", "readwrite");
+            const store = tx.objectStore("outbox");
+            let outcome = "gone";
+            const req = store.get(localId);
+            req.onsuccess = () => {
+                const current = req.result;
+                if (!current) return;
+                if (outboxFingerprint(current) === expected) {
+                    store.delete(localId);
+                    outcome = "removed";
+                } else {
+                    outcome = "changed";
+                }
+            };
+            tx.oncomplete = () => resolve(outcome);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error("Outbox transaction aborted"));
+        });
+    }
+
+    // Move a PENDING upsert (and its local data row) from id `oldId` to
+    // `newId` in one transaction - used to adopt the server's canonical id.
+    // The pending edit is preserved exactly (same fields, same updated_at);
+    // only `id` changes. Applies to the item's CURRENT content, so an edit
+    // coalesced a moment ago is not lost. If another, distinct pending item
+    // already owns `newId`, both items are kept; the local row keeps the
+    // existing row when options.preferExisting(moved, existing) says so.
+    // Resolves "rekeyed" or "skipped" (conditions no longer hold).
+    async function rekeyPendingRecord(table, localId, oldId, newId, options) {
+        if (!oldId || !newId || oldId === newId) return "skipped";
+        const preferExisting = options && options.preferExisting;
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction([table, "outbox"], "readwrite");
+            const rows = tx.objectStore(table);
+            const outbox = tx.objectStore("outbox");
+            let outcome = "skipped";
+
+            const itemReq = outbox.get(localId);
+            itemReq.onsuccess = () => {
+                const item = itemReq.result;
+                if (!item || item.status !== "pending" || item.table !== table ||
+                    item.action !== "upsert" || !item.record || item.record.id !== oldId) {
+                    return;
+                }
+                const moved = Object.assign({}, item.record, { id: newId });
+
+                const allReq = outbox.getAll();
+                allReq.onsuccess = () => {
+                    const otherOwners = (allReq.result || []).filter(i =>
+                        i.localId !== localId && i.status === "pending" && i.table === table &&
+                        i.record && i.record.id === newId
+                    );
+                    const curReq = rows.get(newId);
+                    curReq.onsuccess = () => {
+                        const current = curReq.result;
+                        rows.delete(oldId);
+                        const keepExisting = otherOwners.length > 0 && current &&
+                            typeof preferExisting === "function" && preferExisting(moved, current);
+                        if (!keepExisting) rows.put(moved);
+                        item.record = moved;
+                        item.rev = (item.rev || 0) + 1;
+                        outbox.put(item);
+                        outcome = "rekeyed";
+                    };
+                };
+            };
+            tx.oncomplete = () => resolve(outcome);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error("Outbox transaction aborted"));
+        });
     }
 
     async function outboxCount() {
@@ -455,7 +657,10 @@
                         continue; // leave it queued, try again next sync
                     }
 
-                    await removeFromOutbox(item.localId);
+                    // Stage 8H-5a: remove only if the item is still exactly what was
+                    // sent. If the teacher edited the same record while this request was
+                    // in flight, the newer version stays pending for the next pass.
+                    await removeOutboxIfUnchanged(item.localId, item);
                     succeeded++;
 
                 } catch (err) {
@@ -559,6 +764,9 @@
         setMeta,
         getMeta,
         enqueue,
+        putAndEnqueue,
+        removeOutboxIfUnchanged,
+        rekeyPendingRecord,
         getPendingOutbox,
         removeFromOutbox,
         updateOutboxItem,
