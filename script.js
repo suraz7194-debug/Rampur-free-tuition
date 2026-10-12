@@ -758,7 +758,7 @@ async function adminLogout() {
         if (pendingFinance.length > 0) {
             alert(
                 navigator.onLine
-                    ? "You have unsynced Finance changes. Please sync while logged in as Owner before logging out."
+                    ? "You have unsynced Finance changes. Please sync while logged in as Owner before logging out. If a change keeps failing, open Sync details to see why and export a copy - exporting does not clear the queue, and logout stays blocked until the changes sync."
                     : "You have unsynced Finance changes and this device is offline. Logout is blocked until you reconnect and those changes sync."
             );
             return;
@@ -769,6 +769,11 @@ async function adminLogout() {
         // than trapping the user in a session they can't exit.
         console.warn("Could not check for pending Finance outbox entries before logout:", err);
     }
+
+    // Stage 8H-5b: this tab stops scheduling retries once logout is allowed
+    // (queued, non-Finance changes are untouched and sync after the next login).
+    cancelScheduledSync();
+    closeSyncPanel();
 
     // Best-effort, non-blocking - see doc comment on the function itself.
     deactivateCurrentDeviceSubscriptionOnLogout(currentUserId);
@@ -1454,20 +1459,203 @@ async function initApp() {
 
     if (!appEventsBound) {
         appEventsBound = true;
-        window.addEventListener("online", () => { updateConnectionBadge(); syncNow(); });
+        // Stage 8H-5b: every automatic trigger says where it came from, so only
+        // the "Sync now" button / details panel count as manual.
+        window.addEventListener("online", () => { updateConnectionBadge(); syncNow({ source: "online" }); });
         window.addEventListener("offline", updateConnectionBadge);
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible") maybeSyncOnWake("visibility");
+        });
+        window.addEventListener("pagehide", cancelScheduledSync);
+        window.addEventListener("pageshow", e => { if (e && e.persisted) maybeSyncOnWake("visibility"); });
     }
     updateConnectionBadge();
     updateSyncBadge();
+    installSyncPanelEntry();
 
     if (navigator.onLine) {
-        syncNow();
+        syncNow({ source: "startup" });
     }
 }
 
-let lastSyncFailed = false;
+/* ===== Stage 8H-5b BEGIN: retry scheduling, orphan checks, sync details ===== */
 
-async function syncNow() {
+let lastSyncFailed = false;
+let syncRerunRequested = false;     // a mutation / manual request arrived while a pass was running
+let syncFollowUpStreak = 0;         // consecutive follow-up passes (spaces them out; no tight loops)
+let syncTimerId = null;             // the ONE managed retry timer of this tab
+let syncTimerAt = 0;
+const SYNC_FOLLOWUP_DELAYS_MS = [1000, 15000, 60000, 300000];
+const SYNC_TIMER_MAX_MS = 16 * 60 * 1000;
+
+/* Limitations (documented, not solved here): the "syncing" guard and this timer
+   are per tab - there is no Web Locks / cross-tab mutual exclusion, so two open
+   tabs can both send (safe: upserts are idempotent and removal is conditional),
+   and tabs still running older code ignore retry delays and still drop nothing
+   new but also do not honour the issue flags. Nothing retries while the app is
+   closed (no Background Sync). */
+
+function retryEngineAvailable() {
+    return typeof RFT.recordOutboxFailure === "function" &&
+        typeof RFT.getOutboxSummary === "function" &&
+        typeof RFT.getOutboxIssues === "function";
+}
+
+function cancelScheduledSync() {
+    if (syncTimerId !== null) clearTimeout(syncTimerId);
+    syncTimerId = null;
+    syncTimerAt = 0;
+}
+
+// Replaces any pending timer (there is never more than one).
+function scheduleSyncAt(ts) {
+    const target = Number(ts);
+    if (!isFinite(target)) return;
+    const now = Date.now();
+    const delay = Math.min(Math.max(target - now, 1000), SYNC_TIMER_MAX_MS);
+    cancelScheduledSync();
+    syncTimerAt = now + delay;
+    syncTimerId = setTimeout(() => {
+        syncTimerId = null;
+        syncTimerAt = 0;
+        syncNow({ source: "timer" });
+    }, delay);
+}
+
+// Decide when the next pass should run after one finished: a follow-up for a
+// newer edit / retained item (spaced out if it keeps happening), the breaker's
+// retry-after, and the earliest backoff of any delayed item.
+async function scheduleAfterPass(result) {
+    if (!retryEngineAvailable()) return;
+    try {
+        // Read the queue as it is NOW (after the pass), not as the pass saw it.
+        const summary = await RFT.getOutboxSummary();
+        const now = Date.now();
+        let wantAt = null;
+        const want = t => { if (wantAt === null || t < wantAt) wantAt = t; };
+
+        // Stage 8H-5b D1: work that became due while this pass was running
+        // (its timer, if any, fired into the "already-syncing" guard and did
+        // nothing) must still get another automatic attempt. "Due" only means
+        // eligible - it is not assumed sent. A pass that stopped on repeated
+        // network failures is excluded: its own retry-after paces the next try.
+        // An attempted failure gets a fresh future delay, so it is not due again;
+        // anything that stays due anyway rides the growing follow-up spacing
+        // below instead of looping.
+        const dueNow = !!(summary && summary.sendableDue > 0) && !(result && result.aborted);
+
+        if (syncRerunRequested || (result && result.retained > 0) || dueNow) {
+            syncRerunRequested = false;
+            want(now + SYNC_FOLLOWUP_DELAYS_MS[Math.min(syncFollowUpStreak, SYNC_FOLLOWUP_DELAYS_MS.length - 1)]);
+            syncFollowUpStreak++;
+        } else {
+            syncFollowUpStreak = 0;
+        }
+        if (result && result.aborted) want(now + (result.retryAfterMs || 15000));
+
+        if (summary && summary.nextDueAt) want(summary.nextDueAt);
+
+        if (wantAt !== null) scheduleSyncAt(wantAt);
+        else cancelScheduledSync();
+    } catch (err) {
+        console.warn("Could not schedule the next sync:", err);
+    }
+}
+
+// Tab became visible / page restored: sync only if something is actually due,
+// otherwise just re-arm the timer.
+async function maybeSyncOnWake(source) {
+    if (!retryEngineAvailable() || !navigator.onLine) return;
+    try {
+        const s = await RFT.getOutboxSummary();
+        if (s.sendableDue > 0) { syncNow({ source }); return; }
+        if (s.nextDueAt) scheduleSyncAt(s.nextDueAt);
+    } catch (err) { /* ignore */ }
+}
+
+/* ---- Orphaned attendance: confirm the parent student with a POINT query ----
+   A bulk pull is never used as proof (it can be truncated, partial or empty).
+   "absent" needs: a signed-in session, a successful point query that returns
+   no row, AND a positive control showing this account can read students at all
+   (so an RLS-filtered or signed-out read cannot look like "deleted"). Anything
+   else is "unverified". Attendance only: its student_id foreign key is the one
+   that was verified in earlier audits; fees/results are not assumed. */
+async function verifyAttendanceParent(item) {
+    const studentId = item && item.record ? item.record.student_id : null;
+    if (!studentId) return "unverified";
+    try {
+        const sess = await RFT.withTimeout(supabaseClient.auth.getSession(), 8000, "Session check");
+        const session = sess && sess.data ? sess.data.session : null;
+        if (!session || !session.access_token) return "unverified";
+
+        const point = await RFT.withAbortableTimeout(
+            supabaseClient.from("students").select("id").eq("id", studentId).limit(1), 15000, "Parent check");
+        if (!point || point.error) return "unverified";
+        if (Array.isArray(point.data) && point.data.length > 0) return "exists";
+
+        const control = await RFT.withAbortableTimeout(
+            supabaseClient.from("students").select("id").limit(1), 15000, "Parent check control");
+        if (!control || control.error || !Array.isArray(control.data) || control.data.length === 0) return "unverified";
+        return "absent";
+    } catch (err) {
+        return "unverified";
+    }
+}
+
+const parentCheckedAt = new Map();
+
+async function verifyOrphanCandidates() {
+    if (!retryEngineAvailable()) return;
+    let candidates = [];
+    try {
+        candidates = (await RFT.getPendingOutbox()).filter(i =>
+            i.table === "attendance" && i.action === "upsert" && i.issue === "parent-unverified");
+    } catch (err) { return; }
+
+    let checked = 0;
+    for (const item of candidates) {
+        if (checked >= 10) break;
+        if (Date.now() - (parentCheckedAt.get(item.localId) || 0) < 60000) continue;
+        parentCheckedAt.set(item.localId, Date.now());
+        checked++;
+
+        const verdict = await verifyAttendanceParent(item);
+        try {
+            if (verdict === "absent") {
+                await RFT.markOutboxIssue(item.localId, item, "parent-missing",
+                    "The student record was not found on the server (verified). Your change is kept, not sent.");
+            } else if (verdict === "exists") {
+                await RFT.markOutboxIssue(item.localId, item, "rejected",
+                    "The server rejected this change although the student exists. Kept for review.");
+            }
+            // "unverified": leave the item exactly as it is.
+        } catch (err) { console.warn("Could not update orphan check result:", err); }
+    }
+}
+
+// Decides, per queued item, whether a pass may send it. A verified-missing
+// parent is only re-sent after a manual retry that re-checks the parent first.
+async function syncGate(item, ctx) {
+    if (item.issue === "parent-missing") {
+        if (!ctx || !ctx.force) return "skip";
+        const verdict = await verifyAttendanceParent(item);
+        if (verdict !== "exists") return "skip";
+        try { await RFT.clearOutboxIssue(item.localId, item, { resetBackoff: true }); } catch (err) { return "skip"; }
+        return "send";
+    }
+    return "send";
+}
+
+/* ---- The sync itself ----
+   source: "manual" (the Sync now button calls syncNow() with no arguments),
+   "panel", "startup", "mutation", "online", "timer", "visibility".
+   Only manual/panel ignore retry delays; "online" additionally lets items whose
+   last failure was network/timeout go. */
+async function syncNow(options) {
+    const source = options && typeof options === "object" && typeof options.source === "string"
+        ? options.source : "manual";
+    const isManual = source === "manual" || source === "panel";
+
     if (!navigator.onLine) {
         updateSyncBadge();
         return;
@@ -1476,18 +1664,32 @@ async function syncNow() {
     updateSyncBadge("🔄 Syncing...");
 
     let ok = true;
+    let pushResult = null;
 
     try {
-        const pushResult = await RFT.processOutbox(supabaseClient);
+        if (retryEngineAvailable()) {
+            pushResult = await RFT.processOutbox(supabaseClient, {
+                respectBackoff: true,
+                force: isManual,
+                bypassClasses: source === "online" ? ["network", "timeout"] : [],
+                gate: syncGate
+            });
+        } else {
+            pushResult = await RFT.processOutbox(supabaseClient);
+        }
 
         if (pushResult && pushResult.reason === "already-syncing") {
             // Another sync is already in flight - let it finish and
-            // reflect its outcome instead of racing it.
+            // reflect its outcome instead of racing it. A new edit or a
+            // manual request asks that pass for exactly one follow-up.
+            if (source === "mutation" || isManual) syncRerunRequested = true;
             updateSyncBadge();
             return;
         }
 
         if (pushResult && pushResult.failed > 0) ok = false;
+
+        await verifyOrphanCandidates();
 
         // Best-effort role refresh - picks up a role change (e.g. an
         // owner promoting/demoting someone) without requiring the
@@ -1519,7 +1721,13 @@ async function syncNow() {
     }
 
     lastSyncFailed = !ok;
+    await scheduleAfterPass(pushResult);
     updateSyncBadge();
+}
+
+function formatClock(ts) {
+    try { return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+    catch (err) { return ""; }
 }
 
 async function updateSyncBadge(overrideText) {
@@ -1533,18 +1741,205 @@ async function updateSyncBadge(overrideText) {
 
     const pending = await RFT.outboxCount();
 
+    let summary = null;
+    if (retryEngineAvailable()) {
+        try { summary = await RFT.getOutboxSummary(); } catch (err) { summary = null; }
+    }
+
     if (!navigator.onLine) {
         el.textContent = pending > 0 ? ("📴 Offline — " + pending + " pending") : "📴 Offline";
         return;
     }
 
+    if (summary && summary.attention > 0) {
+        el.textContent = "⚠️ " + summary.attention + " need attention — tap for details" +
+            (pending > 0 ? (" (" + pending + " pending)") : "");
+        return;
+    }
+
     if (lastSyncFailed) {
-        el.textContent = "⚠️ Sync failed — will retry" + (pending > 0 ? (" (" + pending + " pending)") : "");
+        // Only promise a retry when one is really scheduled.
+        const when = syncTimerId !== null ? (" — retry at " + formatClock(syncTimerAt)) : " — press Sync now";
+        el.textContent = "⚠️ Sync failed" + when + (pending > 0 ? (" (" + pending + " pending)") : "");
+        return;
+    }
+
+    if (summary && summary.deferred > 0 && summary.sendableDue === 0 && summary.nextDueAt) {
+        el.textContent = "⏳ " + summary.deferred + " waiting — next retry at " + formatClock(summary.nextDueAt);
         return;
     }
 
     el.textContent = pending > 0 ? ("⏳ " + pending + " change(s) waiting to sync") : "✅ All changes synced";
 }
+
+/* ---- Sync details panel (built here; no HTML/CSS edits) ----
+   View, Retry and Export only. There is deliberately NO discard, clear or
+   dismiss action: nothing in this panel removes or alters a queued change. */
+
+const SYNC_ISSUE_TEXT = {
+    "unknown-action": "Unknown kind of change. It is kept and never sent.",
+    "delete-unconfirmed": "The server did not confirm this delete (the record may already be gone, or this account may not be allowed to delete it). It stays queued.",
+    "parent-unverified": "The server rejected this change because a related student is missing, but that could not be verified yet. It stays queued.",
+    "parent-missing": "The related student was not found on the server (verified). Your change is kept and not sent; Retry re-checks.",
+    "rejected": "The server rejected this change (invalid or conflicting data). It stays queued.",
+    "auth-or-permission": "A sign-in or permission problem is blocking this change. It stays queued."
+};
+const SYNC_CLASS_TEXT = {
+    "network": "No connection to the server.",
+    "timeout": "The server did not answer in time.",
+    "rate-limit": "The server asked us to slow down.",
+    "server": "Temporary server problem.",
+    "waiting-for-parent": "Waiting for a related record to sync first.",
+    "unexpected": "Unexpected problem."
+};
+const SYNC_TABLE_LABEL = {
+    students: "Student", attendance: "Attendance", fees: "Fee", exams: "Exam",
+    results: "Result", groups: "Group", events: "Event", finance: "Finance"
+};
+
+function describeSyncItem(i) {
+    const label = SYNC_TABLE_LABEL[i.table] || String(i.table || "Item");
+    const what = label + (i.action === "delete" ? " delete" : i.action === "upsert" ? " change" : " operation");
+    let reason;
+    if (i.lastErrorClass === "auth-or-permission" || i.issue === "auth-or-permission") {
+        if (i.lastErrorSub === "sign-in-required") reason = "Sign-in required: please sign in again. It stays queued.";
+        else if (i.lastErrorSub === "permission-denied") reason = "Permission denied for this account. It stays queued.";
+        else reason = SYNC_ISSUE_TEXT["auth-or-permission"];
+    } else if (i.issue && SYNC_ISSUE_TEXT[i.issue]) {
+        reason = SYNC_ISSUE_TEXT[i.issue];
+    } else {
+        reason = SYNC_CLASS_TEXT[i.lastErrorClass] || "Waiting to sync.";
+    }
+    if (i.issueDetail) reason += " " + i.issueDetail;
+    return { what, reason };
+}
+
+function closeSyncPanel() {
+    const p = document.getElementById("syncIssuesPanel");
+    if (p) p.remove();
+}
+
+async function exportQueuedChanges() {
+    if (typeof RFT.exportPendingOutbox !== "function") return;
+    const snapshot = await RFT.exportPendingOutbox();   // read-only
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "rampur-unsynced-changes-" + stamp + ".json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+async function renderSyncPanel() {
+    const panel = document.getElementById("syncIssuesPanel");
+    if (!panel) return;
+    while (panel.firstChild) panel.removeChild(panel.firstChild);
+
+    const add = (tag, text, css) => {
+        const e = document.createElement(tag);
+        if (text !== undefined) e.textContent = text;
+        if (css) e.style.cssText = css;
+        panel.appendChild(e);
+        return e;
+    };
+
+    add("h3", "Sync details", "margin:0 0 6px 0;");
+
+    let summary = { pending: 0, deferred: 0, attention: 0, sendableDue: 0, nextDueAt: null };
+    let items = [];
+    try {
+        summary = await RFT.getOutboxSummary();
+        items = await RFT.getOutboxIssues();
+    } catch (err) {
+        add("p", "Could not read the sync queue.", "margin:4px 0;");
+    }
+
+    add("p", "Pending: " + summary.pending + "  ·  Waiting for retry: " + summary.deferred +
+        "  ·  Need attention: " + summary.attention, "margin:4px 0;font-weight:600;");
+    add("p", "Nothing here is ever deleted automatically. Export keeps a copy of every queued change " +
+        "(it contains the records themselves, so store the file safely).", "margin:4px 0;font-size:0.85em;opacity:0.8;");
+
+    if (items.length === 0) {
+        add("p", "No blocked or delayed changes.", "margin:8px 0;");
+    }
+    items.forEach(i => {
+        const d = describeSyncItem(i);
+        const box = add("div", undefined, "border-top:1px solid #ddd;padding:6px 0;");
+        const line1 = document.createElement("div");
+        line1.style.cssText = "font-weight:600;";
+        line1.textContent = d.what;
+        box.appendChild(line1);
+        const line2 = document.createElement("div");
+        line2.textContent = d.reason;
+        box.appendChild(line2);
+        const meta = [];
+        if (i.attempts) meta.push("attempts: " + i.attempts);
+        if (i.lastErrorCode) meta.push("code " + i.lastErrorCode);
+        if (i.lastHttpStatus) meta.push("HTTP " + i.lastHttpStatus);
+        if (i.issueSince) meta.push("since " + formatClock(i.issueSince));
+        if (!i.due && i.nextAttemptAt) meta.push("next retry " + formatClock(i.nextAttemptAt));
+        if (meta.length) {
+            const line3 = document.createElement("div");
+            line3.style.cssText = "font-size:0.8em;opacity:0.7;";
+            line3.textContent = meta.join(" · ");
+            box.appendChild(line3);
+        }
+    });
+
+    const row = add("div", undefined, "display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;");
+    const mkBtn = (text, onClick) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = text;
+        b.style.cssText = "padding:6px 12px;border-radius:8px;border:1px solid #888;background:#f3f3f3;color:#111;cursor:pointer;";
+        b.onclick = onClick;
+        row.appendChild(b);
+        return b;
+    };
+    mkBtn("🔄 Retry now", async () => { await syncNow({ source: "panel" }); renderSyncPanel(); });
+    mkBtn("⬇️ Export unsynced changes", async () => {
+        try { await exportQueuedChanges(); } catch (err) { console.error("Export failed:", err); alert("Could not export the queued changes."); }
+    });
+    mkBtn("Close", closeSyncPanel);
+}
+
+function toggleSyncPanel() {
+    if (!retryEngineAvailable()) return;
+    if (document.getElementById("syncIssuesPanel")) { closeSyncPanel(); return; }
+    const panel = document.createElement("div");
+    panel.id = "syncIssuesPanel";
+    panel.style.cssText = "position:fixed;top:8px;left:8px;right:8px;max-width:560px;margin:0 auto;" +
+        "max-height:80vh;overflow:auto;background:#fff;color:#111;border-radius:12px;padding:14px;" +
+        "box-shadow:0 8px 30px rgba(0,0,0,0.35);z-index:99999;font-size:0.9rem;";
+    document.body.appendChild(panel);
+    renderSyncPanel();
+}
+
+let syncPanelEntryInstalled = false;
+function installSyncPanelEntry() {
+    if (syncPanelEntryInstalled || !retryEngineAvailable()) return;
+    const badge = document.getElementById("syncBadge");
+    if (!badge) return;
+    syncPanelEntryInstalled = true;
+    badge.style.cursor = "pointer";
+    badge.title = "Sync details";
+    badge.onclick = toggleSyncPanel;
+    const bar = badge.parentElement;
+    if (bar) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "sync-now-button";
+        btn.textContent = "📋 Sync details";
+        btn.onclick = toggleSyncPanel;
+        bar.appendChild(btn);
+    }
+}
+
+/* ===== Stage 8H-5b END ===== */
 
 function updateConnectionBadge() {
     const el = document.getElementById("connectionBadge");
@@ -1563,7 +1958,7 @@ function saveAll() {
     // those changes to Supabase right away when online, instead of
     // waiting for the next scheduled sync.
     if (navigator.onLine) {
-        syncNow();
+        syncNow({ source: "mutation" });
     } else {
         updateSyncBadge();
     }
