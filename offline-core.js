@@ -299,6 +299,177 @@
         });
     }
 
+    /* ---- Stage 8H-5b: retry metadata, failure classification, backoff ---------
+
+       Every field below is OPTIONAL on an outbox item and lives next to the
+       existing fields; status stays "pending". Items written by older code
+       (no retry fields) are simply "due". None of these fields is part of
+       outboxFingerprint(), so writing them can never make an in-flight
+       request think its item "changed".
+         retryCount      consecutive failures of THIS version of the item
+         nextAttemptAt   ms epoch before which an automatic pass skips it
+         retryFp         fingerprint of the item when it last failed
+         lastAttemptAt   ms epoch of the last failed send
+         lastErrorClass  network | timeout | rate-limit | server |
+                         auth-or-permission | waiting-for-parent | rejected |
+                         delete-unconfirmed | unexpected
+         lastErrorCode / lastErrorSub / lastHttpStatus
+         issue           item needs a human look (never removes the item):
+                         unknown-action | delete-unconfirmed | rejected |
+                         parent-unverified | parent-missing | auth-or-permission
+         issueSince / issueDetail
+       -------------------------------------------------------------------------- */
+
+    const RETRY_CAP_MS = 15 * 60 * 1000;          // longest automatic delay
+    const RETRY_CLOCK_SLACK_MS = 60 * 1000;       // tolerance before a far-future timestamp is distrusted
+    const RETRY_ERROR_TEXT_MAX = 300;
+    const RETRY_AUTH_ISSUE_AFTER = 3;             // consecutive auth/permission failures before it is flagged
+    const RETRY_NETWORK_STREAK_LIMIT = 2;         // consecutive network/timeout failures that end a pass
+    const RETRY_BASE_MS = {
+        "network": 15000,
+        "timeout": 15000,
+        "rate-limit": 60000,
+        "server": 30000,
+        "auth-or-permission": 60000,
+        "waiting-for-parent": 30000,
+        "rejected": 120000,
+        "delete-unconfirmed": 60000,
+        "unexpected": 60000
+    };
+    const RETRY_FIELDS = [
+        "retryCount", "nextAttemptAt", "retryFp", "lastAttemptAt",
+        "lastErrorClass", "lastErrorCode", "lastErrorSub", "lastHttpStatus",
+        "issue", "issueSince", "issueDetail"
+    ];
+    const ZERO_ROW_MESSAGE =
+        "Delete could not be confirmed. The server may have already removed the record or your account may not have permission.";
+
+    // Plain, bounded, markup-free text for storage and display. Never keeps
+    // HTML bodies, tokens or API keys.
+    function boundText(value, max) {
+        let s = "";
+        try {
+            if (value === null || value === undefined) s = "";
+            else if (typeof value === "string") s = value;
+            else if (typeof value.message === "string") s = value.message;
+            else s = String(value);
+        } catch (e) { s = ""; }
+        s = String(s)
+            .replace(/<script[\s\S]*?<\/script>/gi, " ")
+            .replace(/<style[\s\S]*?<\/style>/gi, " ")
+            .replace(/<[^>]*>/g, " ")
+            .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, "[token]")
+            .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+            .replace(/sb_(publishable|secret)_[A-Za-z0-9_-]+/g, "[key]")
+            .replace(/\s+/g, " ")
+            .trim();
+        const limit = typeof max === "number" && max > 1 ? max : RETRY_ERROR_TEXT_MAX;
+        return s.length > limit ? s.slice(0, limit - 1) + "…" : s;
+    }
+
+    // Decide what kind of failure this is from the OPERATION, the structured
+    // error code, the status AND the message - never from status alone. Anything
+    // uncertain becomes "unexpected": kept, retried with backoff, never removed.
+    // info: { operation, table, status, error, thrown, zeroRow, zeroRowMessage,
+    //         online, hasSession (true|false|null = unknown), parentPending }
+    function classifyOutboxFailure(info) {
+        info = info || {};
+        const err = info.error || null;
+        const thrown = info.thrown || null;
+        const status = typeof info.status === "number" ? info.status
+            : (err && typeof err.status === "number" ? err.status : null);
+        const code = err && err.code !== undefined && err.code !== null ? String(err.code) : "";
+        const rawMessage = err ? (err.message !== undefined ? err.message : err)
+            : (thrown ? (thrown.message !== undefined ? thrown.message : thrown) : "");
+        const message = boundText(rawMessage, RETRY_ERROR_TEXT_MAX);
+        const hint = err && err.hint ? boundText(err.hint, 120) : "";
+        const lower = (message + " " + hint).toLowerCase();
+        const out = (cls, extra) => Object.assign(
+            { cls, code: code.slice(0, 32), httpStatus: status, message, issue: null }, extra || {});
+
+        // A delete that "succeeded" but touched zero rows: ambiguous (already
+        // gone, or not allowed). Always kept and surfaced; never resolved here.
+        if (info.zeroRow) {
+            return out("delete-unconfirmed", {
+                issue: "delete-unconfirmed",
+                message: boundText(info.zeroRowMessage || ZERO_ROW_MESSAGE, RETRY_ERROR_TEXT_MAX)
+            });
+        }
+
+        // Exceptions thrown instead of an error object (our own timeout, fetch
+        // failures when throwOnError is used, JavaScript errors).
+        if (thrown) {
+            const name = String(thrown.name || "");
+            const text = String(thrown.message || "");
+            if (name === "AbortError" || /timed out|timeout/i.test(text)) return out("timeout");
+            if (name === "TypeError" || /failed to fetch|network|load failed/i.test(text)) return out("network");
+            return out("unexpected");
+        }
+        if (!err) return out("unexpected");
+
+        if (/^aborterror/i.test(message) || /abort/i.test(hint) || /timed out/.test(lower) || status === 408) {
+            return out("timeout");
+        }
+        if (status === 0 || /^(typeerror|networkerror|fetcherror)/i.test(message) ||
+            /failed to fetch|network request failed|load failed/.test(lower) || info.online === false) {
+            return out("network");
+        }
+        if (status === 429) return out("rate-limit");
+
+        const authish = status === 401 || status === 403 || code === "42501" || /^PGRST30\d$/.test(code) ||
+            /jwt|not authenticated|permission denied|row-level security/.test(lower);
+        if (authish) {
+            // Only claim a specific cause when the evidence supports it.
+            let sub = "auth-unverified";
+            if (info.hasSession === false) sub = "sign-in-required";
+            else if (info.hasSession === true &&
+                (code === "42501" || status === 403 || /row-level security|permission denied/.test(lower))) sub = "permission-denied";
+            return out("auth-or-permission", { sub, issueAfter: RETRY_AUTH_ISSUE_AFTER, issueName: "auth-or-permission" });
+        }
+
+        if (/^23/.test(code) || /^22/.test(code) || status === 400 || status === 409 ||
+            status === 413 || status === 422 || /^PGRST1/.test(code)) {
+            if (code === "23503") {
+                // Foreign-key failure. If the parent is itself still queued it is
+                // simply not there yet; otherwise the parent is unverified.
+                if (info.parentPending) return out("waiting-for-parent");
+                return out("rejected", { issue: info.table === "attendance" ? "parent-unverified" : "rejected" });
+            }
+            return out("rejected", { issue: "rejected" });
+        }
+        if (typeof status === "number" && status >= 500) return out("server");
+        return out("unexpected");
+    }
+
+    // Capped exponential backoff with downward-only jitter, so the result can
+    // never exceed RETRY_CAP_MS. rand is injectable for tests.
+    function computeBackoffMs(cls, retryCount, rand) {
+        const base = RETRY_BASE_MS[cls] || 60000;
+        const n = Math.max(1, Math.min(Number(retryCount) || 1, 30));
+        const raw = Math.min(RETRY_CAP_MS, base * Math.pow(2, Math.min(n - 1, 20)));
+        const r = typeof rand === "number" ? Math.min(1, Math.max(0, rand)) : Math.random();
+        return Math.max(1000, Math.min(RETRY_CAP_MS, Math.round(raw * (0.8 + 0.2 * r))));
+    }
+
+    // Is this item eligible for an automatic send right now? Missing, invalid
+    // or implausibly distant timestamps mean "yes" (never stuck), and so does a
+    // record that has changed since the failure the delay was earned for.
+    function isRetryDue(item, now) {
+        const t = item ? item.nextAttemptAt : undefined;
+        if (t === undefined || t === null) return true;
+        if (typeof t !== "number" || !isFinite(t)) return true;
+        if (t <= now) return true;
+        if (t - now > RETRY_CAP_MS + RETRY_CLOCK_SLACK_MS) return true;
+        if (item.retryFp !== undefined && item.retryFp !== outboxFingerprint(item)) return true;
+        return false;
+    }
+
+    function clearRetryState(item) {
+        RETRY_FIELDS.forEach(f => { delete item[f]; });
+        item.attempts = 0;
+        item.lastError = null;
+    }
+
     // The body of enqueue(), working on an already-open readwrite "outbox"
     // object store so the CALLER decides the transaction boundary (enqueue()
     // uses the outbox alone; putAndEnqueue() adds the data row to the same
@@ -321,7 +492,9 @@
                     // another full round trip for it. rev++ lets an in-flight
                     // request for the OLD payload see that this item changed.
                     existingUpsert.record = record;
-                    existingUpsert.lastError = null;
+                    // Stage 8H-5b: a newer edit starts with a clean slate - no
+                    // inherited delay, count or issue from the older version.
+                    clearRetryState(existingUpsert);
                     existingUpsert.rev = (existingUpsert.rev || 0) + 1;
                     outboxStore.put(existingUpsert);
                     onDone(existingUpsert.localId);
@@ -519,6 +692,14 @@
                         if (!keepExisting) rows.put(moved);
                         item.record = moved;
                         item.rev = (item.rev || 0) + 1;
+                        // Stage 8H-5b: delay/error metadata described the OLD
+                        // target; the operation and data are untouched.
+                        ["retryCount", "nextAttemptAt", "retryFp", "lastAttemptAt", "lastErrorClass",
+                         "lastErrorCode", "lastErrorSub", "lastHttpStatus"].forEach(f => { delete item[f]; });
+                        item.lastError = null;
+                        if (typeof item.issue === "string" && item.issue.indexOf("parent-") === 0) {
+                            delete item.issue; delete item.issueSince; delete item.issueDetail;
+                        }
                         outbox.put(item);
                         outcome = "rekeyed";
                     };
@@ -528,6 +709,174 @@
             tx.onerror = () => reject(tx.error);
             tx.onabort = () => reject(tx.error || new Error("Outbox transaction aborted"));
         });
+    }
+
+    // Record a failed send. Applies ONLY if the stored item is still exactly
+    // the item that was sent (same fingerprint) - a newer coalesced edit is
+    // never penalised by an older request's failure. One transaction.
+    // meta: { cls, message, code, httpStatus, sub, issue, issueAfter, issueName, now, rand }
+    // Resolves { outcome: "recorded"|"changed"|"gone", nextAttemptAt, retryCount, issue }.
+    async function recordOutboxFailure(localId, sentItem, meta) {
+        meta = meta || {};
+        const expected = outboxFingerprint(sentItem);
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction("outbox", "readwrite");
+            const store = tx.objectStore("outbox");
+            const result = { outcome: "gone", nextAttemptAt: null, retryCount: null, issue: null };
+            const req = store.get(localId);
+            req.onsuccess = () => {
+                const cur = req.result;
+                if (!cur) return;
+                if (outboxFingerprint(cur) !== expected) { result.outcome = "changed"; return; }
+                const now = typeof meta.now === "number" ? meta.now : Date.now();
+                const prev = typeof cur.retryCount === "number" && cur.retryCount >= 0 ? cur.retryCount : 0;
+                const n = prev + 1;
+                cur.attempts = (cur.attempts || 0) + 1;
+                cur.retryCount = n;
+                cur.lastAttemptAt = now;
+                cur.lastError = boundText(meta.message, RETRY_ERROR_TEXT_MAX);
+                cur.lastErrorClass = meta.cls || "unexpected";
+                if (meta.code) cur.lastErrorCode = String(meta.code).slice(0, 32); else delete cur.lastErrorCode;
+                if (meta.sub) cur.lastErrorSub = String(meta.sub).slice(0, 32); else delete cur.lastErrorSub;
+                if (typeof meta.httpStatus === "number") cur.lastHttpStatus = meta.httpStatus; else delete cur.lastHttpStatus;
+                cur.nextAttemptAt = now + computeBackoffMs(cur.lastErrorClass, n, meta.rand);
+                cur.retryFp = expected;
+                let issue = meta.issue || null;
+                if (!issue && meta.issueAfter && n >= meta.issueAfter) issue = meta.issueName || null;
+                // An unverified guess never downgrades an issue a later check has established.
+                if (issue === "parent-unverified" && (cur.issue === "parent-missing" || cur.issue === "rejected")) issue = null;
+                if (issue) {
+                    if (cur.issue !== issue) cur.issueSince = now;
+                    cur.issue = issue;
+                }
+                store.put(cur);
+                result.outcome = "recorded";
+                result.nextAttemptAt = cur.nextAttemptAt;
+                result.retryCount = n;
+                result.issue = cur.issue || null;
+            };
+            tx.oncomplete = () => resolve(result);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error("Outbox transaction aborted"));
+        });
+    }
+
+    // Flag an item as needing attention (or update the explanation). Never
+    // removes or alters the operation or its data; skipped if the item changed.
+    async function markOutboxIssue(localId, sentItem, issue, detail, now) {
+        const expected = sentItem ? outboxFingerprint(sentItem) : null;
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction("outbox", "readwrite");
+            const store = tx.objectStore("outbox");
+            let outcome = "gone";
+            const req = store.get(localId);
+            req.onsuccess = () => {
+                const cur = req.result;
+                if (!cur) return;
+                if (expected !== null && outboxFingerprint(cur) !== expected) { outcome = "changed"; return; }
+                const t = typeof now === "number" ? now : Date.now();
+                if (cur.issue !== issue) cur.issueSince = t;
+                cur.issue = issue;
+                if (detail) cur.issueDetail = boundText(detail, 200); else delete cur.issueDetail;
+                store.put(cur);
+                outcome = "marked";
+            };
+            tx.oncomplete = () => resolve(outcome);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error("Outbox transaction aborted"));
+        });
+    }
+
+    // Clear an issue flag (not the item). options.resetBackoff also makes the
+    // item immediately due. Skipped if the item changed since `sentItem`.
+    async function clearOutboxIssue(localId, sentItem, options) {
+        const expected = sentItem ? outboxFingerprint(sentItem) : null;
+        const resetBackoff = !!(options && options.resetBackoff);
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction("outbox", "readwrite");
+            const store = tx.objectStore("outbox");
+            let outcome = "gone";
+            const req = store.get(localId);
+            req.onsuccess = () => {
+                const cur = req.result;
+                if (!cur) return;
+                if (expected !== null && outboxFingerprint(cur) !== expected) { outcome = "changed"; return; }
+                delete cur.issue; delete cur.issueSince; delete cur.issueDetail;
+                if (resetBackoff) { delete cur.nextAttemptAt; delete cur.retryFp; }
+                store.put(cur);
+                outcome = "cleared";
+            };
+            tx.oncomplete = () => resolve(outcome);
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error || new Error("Outbox transaction aborted"));
+        });
+    }
+
+    // Read-only summaries for the UI and the scheduler. Items that automatic
+    // passes never send (unknown actions, verified-missing parents) are not
+    // counted as "due".
+    function skippedByAutomaticPasses(item) {
+        return item.issue === "unknown-action" || item.issue === "parent-missing" ||
+            (item.action !== "upsert" && item.action !== "delete");
+    }
+
+    async function getOutboxSummary(now) {
+        const t = typeof now === "number" ? now : Date.now();
+        const items = await getPendingOutbox();
+        const s = { pending: items.length, sendableDue: 0, deferred: 0, attention: 0, nextDueAt: null, byIssue: {} };
+        items.forEach(i => {
+            if (i.issue) { s.attention++; s.byIssue[i.issue] = (s.byIssue[i.issue] || 0) + 1; }
+            if (skippedByAutomaticPasses(i)) return;
+            if (isRetryDue(i, t)) { s.sendableDue++; return; }
+            s.deferred++;
+            if (s.nextDueAt === null || i.nextAttemptAt < s.nextDueAt) s.nextDueAt = i.nextAttemptAt;
+        });
+        return s;
+    }
+
+    // Items to show in a "sync details" view: issue-bearing or deferred. No
+    // record contents - only identifiers and bounded metadata.
+    async function getOutboxIssues(now) {
+        const t = typeof now === "number" ? now : Date.now();
+        const items = await getPendingOutbox();
+        return items
+            .filter(i => i.issue || !isRetryDue(i, t) || (i.lastErrorClass && i.retryCount))
+            .map(i => ({
+                localId: i.localId,
+                table: i.table,
+                action: i.action,
+                recordId: i.record && i.record.id ? String(i.record.id) : null,
+                createdAt: i.createdAt,
+                attempts: i.attempts || 0,
+                retryCount: i.retryCount || 0,
+                nextAttemptAt: typeof i.nextAttemptAt === "number" ? i.nextAttemptAt : null,
+                lastAttemptAt: typeof i.lastAttemptAt === "number" ? i.lastAttemptAt : null,
+                lastErrorClass: i.lastErrorClass || null,
+                lastErrorCode: i.lastErrorCode || null,
+                lastErrorSub: i.lastErrorSub || null,
+                lastHttpStatus: typeof i.lastHttpStatus === "number" ? i.lastHttpStatus : null,
+                lastError: i.lastError ? boundText(i.lastError, RETRY_ERROR_TEXT_MAX) : null,
+                issue: i.issue || null,
+                issueSince: i.issueSince || null,
+                issueDetail: i.issueDetail ? boundText(i.issueDetail, 200) : null,
+                due: isRetryDue(i, t)
+            }));
+    }
+
+    // Read-only snapshot of every queued (pending) operation INCLUDING record
+    // contents, for the person to keep as a recovery copy. Changes nothing.
+    async function exportPendingOutbox() {
+        const items = await getPendingOutbox();
+        return {
+            exportedAt: new Date().toISOString(),
+            app: "Rampur Free Tuition",
+            database: DB_NAME,
+            count: items.length,
+            items: JSON.parse(JSON.stringify(items))
+        };
     }
 
     async function outboxCount() {
@@ -560,23 +909,128 @@
        Never throws - callers just get a status back.
        ===================================================== */
 
-    async function processOutbox(supabaseClient) {
+    // Parent rows (students / exams) of a child item that are themselves still
+    // queued: a foreign-key failure then just means "parent not there yet".
+    function hasPendingParent(item, items) {
+        const r = item.record || {};
+        return items.some(o => o.localId !== item.localId && o.action === "upsert" && o.record && (
+            (o.table === "students" && r.student_id && o.record.id === r.student_id) ||
+            (o.table === "exams" && r.exam_id && o.record.id === r.exam_id)));
+    }
+
+    function looksAuthRelated(error, status) {
+        const code = error && error.code ? String(error.code) : "";
+        const msg = error && error.message ? String(error.message).toLowerCase() : "";
+        return status === 401 || status === 403 || code === "42501" || /^PGRST30\d$/.test(code) ||
+            /jwt|not authenticated|permission denied|row-level security/.test(msg);
+    }
+
+    // true = a signed-in session exists, false = confirmed none, null = unknown.
+    async function probeSession(client) {
+        try {
+            if (!client || !client.auth || typeof client.auth.getSession !== "function") return null;
+            const r = await withTimeout(client.auth.getSession(), 8000, "Session check");
+            if (r && r.error) return null;
+            const session = r && r.data ? r.data.session : null;
+            return !!(session && session.access_token);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // options (all optional; with none the behaviour is the pre-8H-5b "send
+    // everything" pass, except that nothing is ever dropped):
+    //   respectBackoff  skip items whose nextAttemptAt is still in the future
+    //   force           ignore backoff (manual sync)
+    //   bypassClasses   items whose last failure class is listed ("network" /
+    //                   "timeout" only) are sent even if delayed
+    //   gate(item, {force})  -> "send" | anything else = skip this pass
+    async function processOutbox(supabaseClient, options) {
 
         if (syncing) return { ok: false, reason: "already-syncing" };
         if (!isOnline()) return { ok: false, reason: "offline" };
+
+        options = options || {};
+        const respectBackoff = options.respectBackoff === true;
+        const force = options.force === true;
+        const bypassClasses = (Array.isArray(options.bypassClasses) ? options.bypassClasses : [])
+            .filter(c => c === "network" || c === "timeout");
+        const gate = typeof options.gate === "function" ? options.gate : null;
 
         syncing = true;
         notifySyncListeners({ phase: "start" });
 
         let succeeded = 0;
         let failed = 0;
+        let deferred = 0;
+        let retained = 0;
+        let skipped = 0;
+        let aborted = false;
+        let retryAfterMs = null;
+        let networkStreak = 0;
 
         try {
             const items = await getPendingOutbox();
 
+            // Persist a classified failure (conditionally - see recordOutboxFailure).
+            const recordFailure = async (item, c) => {
+                failed++;
+                try {
+                    const r = await recordOutboxFailure(item.localId, item, {
+                        cls: c.cls, message: c.message, code: c.code, httpStatus: c.httpStatus, sub: c.sub,
+                        issue: c.issue, issueAfter: c.issueAfter, issueName: c.issueName
+                    });
+                    if (r && r.outcome === "changed") retained++;
+                    return r;
+                } catch (metaErr) {
+                    // Never let bookkeeping break the pass; the item is untouched.
+                    console.warn("Could not record outbox failure metadata:", metaErr);
+                    return null;
+                }
+            };
+
+            // Returns true when the pass should stop (consecutive network-level failures).
+            const noteFailure = (c, r) => {
+                if (c.cls === "network" || c.cls === "timeout") {
+                    networkStreak++;
+                    retryAfterMs = r && typeof r.nextAttemptAt === "number"
+                        ? Math.max(1000, r.nextAttemptAt - Date.now()) : 15000;
+                    if (networkStreak >= RETRY_NETWORK_STREAK_LIMIT) { aborted = true; return true; }
+                } else {
+                    networkStreak = 0;
+                }
+                return false;
+            };
+
             for (const item of items) {
+
+                // Unknown action: never sent, never removed - flagged for review.
+                if (item.action !== "upsert" && item.action !== "delete") {
+                    skipped++;
+                    if (item.issue !== "unknown-action") {
+                        try {
+                            await markOutboxIssue(item.localId, item, "unknown-action",
+                                "Unknown operation type; kept unsent for review.");
+                        } catch (e) { console.warn("Could not flag unknown outbox action:", e); }
+                    }
+                    continue;
+                }
+
+                if (respectBackoff && !force && bypassClasses.indexOf(item.lastErrorClass) === -1 &&
+                    !isRetryDue(item, Date.now())) {
+                    deferred++;
+                    continue;
+                }
+
+                if (gate) {
+                    let verdict = "skip";
+                    try { verdict = await gate(item, { force }); } catch (gateErr) { verdict = "skip"; }
+                    if (verdict !== "send") { skipped++; continue; }
+                }
+
                 try {
                     let error = null;
+                    let status = null;
 
                     if (item.action === "upsert") {
                         const res = await withAbortableTimeout(
@@ -585,93 +1039,57 @@
                             "Upsert"
                         );
                         error = res.error;
-                    } else if (item.action === "delete") {
+                        status = res.status;
+                    } else {
                         const res = await withAbortableTimeout(
                             supabaseClient.from(item.table).delete().eq("id", item.record.id).select("id"),
                             20000,
                             "Delete"
                         );
                         error = res.error;
+                        status = res.status;
 
                         // error === null does NOT necessarily mean the row was
-                        // actually deleted: if RLS filters the row out for this
-                        // session, Postgres/PostgREST report a normal, error-free
-                        // response having deleted zero rows - indistinguishable
-                        // from success unless the deleted rows are requested back
-                        // via .select(), which is why that's now chained above.
-                        // A non-empty res.data means at least one row was
-                        // genuinely deleted - handled by the normal success path
-                        // below, unchanged. An empty array means nothing was
-                        // actually deleted; handled here, separately, because it
-                        // must NOT fall through to that same success path.
-                        //
-                        // This can mean either RLS silently blocked the delete,
-                        // or the row was already removed by another device or
-                        // session first - there is no way to tell which from this
-                        // response alone, so no specific cause is claimed.
-                        //
-                        // Reuses the existing attempts/lastError mechanism rather
-                        // than adding a new outbox status, but caps retries for
-                        // this specific case so a permanently-unauthorized delete
-                        // doesn't queue forever: once a few consecutive attempts
-                        // have all come back zero-row, the item is dropped -
-                        // still counted as a failure for this sync pass (never as
-                        // a success), just no longer retried.
+                        // actually deleted: if RLS filters the row out, or the row
+                        // is already gone, PostgREST reports a normal response
+                        // with zero rows. Stage 8H-5b: such a delete is NEVER
+                        // dropped or cleared automatically - it stays queued with
+                        // backoff and a visible "delete-unconfirmed" issue until a
+                        // person resolves it in a future, approved step.
                         if (!error && Array.isArray(res.data) && res.data.length === 0) {
-                            const ZERO_ROW_MESSAGE =
-                                "Delete could not be confirmed. The server may have already removed the record or your account may not have permission.";
-                            const ZERO_ROW_RETRY_LIMIT = 3;
-
-                            const priorAttempts = item.attempts || 0;
-
-                            if (item.lastError === ZERO_ROW_MESSAGE && priorAttempts >= ZERO_ROW_RETRY_LIMIT) {
-                                // Given up after repeated zero-row results - this
-                                // is NOT a success, just stopping asking Supabase
-                                // to do something it has already told us,
-                                // repeatedly, it isn't doing.
-                                await removeFromOutbox(item.localId);
-                                failed++;
-                                continue;
-                            }
-
-                            failed++;
-                            await updateOutboxItem(item.localId, {
-                                attempts: priorAttempts + 1,
-                                lastError: ZERO_ROW_MESSAGE
-                            });
-                            continue; // leave it queued (unless just dropped above), try again next sync
+                            const c = classifyOutboxFailure({ operation: "delete", table: item.table, zeroRow: true });
+                            const r = await recordFailure(item, c);
+                            if (noteFailure(c, r)) break;
+                            continue;
                         }
-                    } else {
-                        // Unknown action - drop it rather than loop on it forever.
-                        console.warn("Dropping outbox item with unknown action:", item);
-                        await removeFromOutbox(item.localId);
-                        continue;
                     }
 
                     if (error) {
-                        failed++;
-                        await updateOutboxItem(item.localId, {
-                            attempts: (item.attempts || 0) + 1,
-                            lastError: error.message || String(error)
+                        let hasSession = null;
+                        if (looksAuthRelated(error, status)) hasSession = await probeSession(supabaseClient);
+                        const c = classifyOutboxFailure({
+                            operation: item.action, table: item.table, status, error, hasSession,
+                            online: isOnline(), parentPending: hasPendingParent(item, items)
                         });
-                        continue; // leave it queued, try again next sync
+                        const r = await recordFailure(item, c);
+                        if (noteFailure(c, r)) break;
+                        continue; // leave it queued; the delay decides when it is retried
                     }
 
                     // Stage 8H-5a: remove only if the item is still exactly what was
                     // sent. If the teacher edited the same record while this request was
-                    // in flight, the newer version stays pending for the next pass.
-                    await removeOutboxIfUnchanged(item.localId, item);
+                    // in flight, the newer version stays pending for a follow-up pass.
+                    const removal = await removeOutboxIfUnchanged(item.localId, item);
                     succeeded++;
+                    if (removal === "changed") retained++;
+                    networkStreak = 0;
 
                 } catch (err) {
-                    // Network drop mid-loop - stop this pass, keep everything
-                    // else queued for the next sync attempt.
-                    failed++;
-                    await updateOutboxItem(item.localId, {
-                        attempts: (item.attempts || 0) + 1,
-                        lastError: err.message || String(err)
+                    const c = classifyOutboxFailure({
+                        operation: item.action, table: item.table, thrown: err, online: isOnline()
                     });
-
+                    const r = await recordFailure(item, c);
+                    if (noteFailure(c, r)) break;
                     if (!isOnline()) break;
                 }
             }
@@ -680,7 +1098,7 @@
         }
 
         notifySyncListeners({ phase: "end", succeeded, failed });
-        return { ok: true, succeeded, failed };
+        return { ok: true, succeeded, failed, deferred, retained, skipped, aborted, retryAfterMs };
     }
 
     async function pullFromServer(supabaseClient, tableFetchers) {
@@ -767,6 +1185,17 @@
         putAndEnqueue,
         removeOutboxIfUnchanged,
         rekeyPendingRecord,
+        recordOutboxFailure,
+        markOutboxIssue,
+        clearOutboxIssue,
+        getOutboxSummary,
+        getOutboxIssues,
+        exportPendingOutbox,
+        classifyOutboxFailure,
+        computeBackoffMs,
+        isRetryDue,
+        boundText,
+        RETRY_CAP_MS,
         getPendingOutbox,
         removeFromOutbox,
         updateOutboxItem,
