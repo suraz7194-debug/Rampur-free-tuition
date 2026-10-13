@@ -6274,6 +6274,94 @@ function formatEventDate(dateStr){
     }
 }
 
+/* ===== Stage WhatsApp-share BEGIN =====
+   "Share on WhatsApp" for event cards. Read-only: builds a plain-text
+   message from the stored event and opens https://wa.me/?text=... so the
+   user picks the contact/group and presses send themselves. Nothing is
+   sent automatically, no permissions are requested, and nothing is read
+   from or written to IndexedDB / Supabase. Needs a connection only for the
+   link itself (WhatsApp / browser), not for building the message. */
+
+const WA_SHARE_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const WA_SHARE_DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+const WA_SHARE_MAX_DESC = 1500;
+
+/* English date from a stored YYYY-MM-DD, using integer/UTC math only
+   (no new Date("YYYY-MM-DD") parsing, so no timezone shift). Falls back to
+   the raw string if it is not a valid calendar date. */
+function whatsappFormatDate(dateStr){
+    let raw = String(dateStr ?? "").trim();
+    let m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    if(!m) return raw;
+    let y = +m[1], mo = +m[2], d = +m[3];
+    let t = new Date(Date.UTC(y, mo - 1, d));
+    if(t.getUTCFullYear() !== y || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d) return raw;
+    return WA_SHARE_DAYS[t.getUTCDay()] + ", " + d + " " + WA_SHARE_MONTHS[mo - 1] + " " + y;
+}
+
+/* "14:30" -> "2:30 PM". Anything unexpected is returned as stored. */
+function whatsappFormatTime(timeStr){
+    let raw = String(timeStr ?? "").trim();
+    let m = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(raw);
+    if(!m) return raw;
+    let h = +m[1], min = m[2];
+    if(h > 23 || +min > 59) return raw;
+    let suffix = h >= 12 ? "PM" : "AM";
+    let h12 = h % 12 === 0 ? 12 : h % 12;
+    return h12 + ":" + min + " " + suffix;
+}
+
+/* Builds the share text. Missing fields are simply left out. */
+function buildEventWhatsAppMessage(ev){
+    if(!ev) return "";
+    let clean = v => String(v ?? "").replace(/\r\n?/g, "\n").trim();
+    let title = clean(ev.title).replace(/\*/g, "").replace(/\s*\n\s*/g, " ");
+    let lines = [];
+    lines.push(eventTypeIcon(ev.type) + " *" + (title || "Untitled") + "*");
+    if(clean(ev.type)) lines.push("Type: " + clean(ev.type));
+    if(clean(ev.date)) lines.push("📅 Date: " + whatsappFormatDate(ev.date));
+    if(clean(ev.time)) lines.push("🕐 Time: " + whatsappFormatTime(ev.time));
+    if(clean(ev.location)) lines.push("📍 Venue: " + clean(ev.location).replace(/\s*\n\s*/g, ", "));
+    let desc = clean(ev.description);
+    if(desc){
+        if(desc.length > WA_SHARE_MAX_DESC) desc = desc.slice(0, WA_SHARE_MAX_DESC).replace(/[\uD800-\uDBFF]$/, "") + "…";
+        lines.push("");
+        lines.push(desc);
+    }
+    return lines.join("\n");
+}
+
+function buildWhatsAppShareUrl(message){
+    let text;
+    try{
+        text = encodeURIComponent(message);
+    } catch(e){
+        // lone surrogate in user text would throw; drop it and retry
+        text = encodeURIComponent(String(message).replace(/[\uD800-\uDFFF]/g, ""));
+    }
+    return "https://wa.me/?text=" + text;
+}
+
+function shareEventOnWhatsApp(eventId){
+    let ev = events.find(e => String(e.id) === String(eventId));
+    if(!ev){
+        alert("This event could not be found.");
+        return;
+    }
+    if(typeof navigator !== "undefined" && navigator.onLine === false){
+        alert("You appear to be offline. Connect to the internet to share on WhatsApp.");
+        return;
+    }
+    let a = document.createElement("a");
+    a.href = buildWhatsAppShareUrl(buildEventWhatsAppMessage(ev));
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+}
+/* ===== Stage WhatsApp-share END ===== */
+
 /* =========================
    ADD / EDIT (one form, same pattern as the rest of the app)
 ========================= */
@@ -6547,8 +6635,8 @@ ${owner ? `
 <div class="event-menu">
 <button class="event-menu-button" onclick="toggleEventMenu(this)">⋮</button>
 <div class="event-menu-dropdown">
-<button onclick="editEvent('${ev.id}')">✏️<span>Edit</span></button>
-<button class="delete-option" onclick="deleteEvent('${ev.id}')">🗑️<span>Delete</span></button>
+<button data-event-id="${escapeHTML(ev.id)}" onclick="editEvent(this.dataset.eventId)">✏️<span>Edit</span></button>
+<button class="delete-option" data-event-id="${escapeHTML(ev.id)}" onclick="deleteEvent(this.dataset.eventId)">🗑️<span>Delete</span></button>
 </div>
 </div>
 ` : ""}
@@ -6560,6 +6648,8 @@ ${owner ? `
 ${ev.description ? `<div class="recent-student-contact">${escapeHTML(ev.description)}</div>` : ""}
 
 <div class="event-footer">Added by Owner</div>
+
+<button type="button" class="event-share-btn" data-event-id="${escapeHTML(ev.id)}" onclick="shareEventOnWhatsApp(this.dataset.eventId)" style="align-self:flex-start;margin-top:6px;padding:6px 11px;border:1px solid #16a34a;border-radius:7px;background:transparent;color:#16a34a;font-size:0.8rem;font-weight:600;">💬 Share on WhatsApp</button>
 
 </div>
 `;
