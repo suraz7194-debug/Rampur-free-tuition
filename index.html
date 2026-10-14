@@ -9,8 +9,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
 <title>Rampur Free Tuition Center</title>
-  
-
 
 <link rel="stylesheet" href="style.css">
 
@@ -107,6 +105,7 @@
 <span id="syncBadge" class="sync-badge">✅ All changes synced</span>
 <button type="button" class="sync-now-button" onclick="syncNow()">🔄 Sync now</button>
 </div>
+<button type="button" class="header-bell" id="notificationBellButton" aria-label="Go to notification settings" title="Notification settings" onclick="goToNotificationSettings()">🔔</button>
 </header>
 
 
@@ -194,7 +193,7 @@
      NOTIFICATIONS (Stage 3 - basic subscription control only)
 ========================= -->
 
-<div class="panel" id="notificationPanel">
+<div class="panel" id="notificationPanel" tabindex="-1">
 
 <h3>🔔 Notifications</h3>
 
@@ -210,78 +209,6 @@ onclick="enablePushNotifications()">
 </button>
 
 <p class="small" id="notificationStatusText" style="margin-top:8px;"></p>
-
-</div>
-
-
-<!-- =========================
-     TEMPORARY (Stage 6A): OWNER-ONLY PUSH TEST
-     Hidden by default; shown only by applyOwnerVisibility().
-     Remove together with sendTestPush() in script.js.
-========================= -->
-
-<div class="panel" id="pushTestPanel" style="display:none;">
-
-<h3>🧪 Push Test (temporary, owner only)</h3>
-
-<button
-class="btn"
-id="pushTestButton"
-onclick="sendTestPush()">
-🔔 Send Test Push
-</button>
-
-<p class="small" id="pushTestStatus" style="margin-top:8px;">Not tested yet</p>
-
-</div>
-
-
-<!-- =========================
-     TEMPORARY (Stage 7B-test): OWNER-ONLY ABSENCE ENGINE DRY TEST
-     Hidden by default; shown only by applyOwnerVisibility().
-     Always runs the engine in DRY-RUN mode (writes nothing).
-     Remove together with runAbsenceEngineDryTest() in script.js.
-========================= -->
-
-<div class="panel" id="absenceEngineTestPanel" style="display:none;">
-
-<h3>🧪 Absence Alert Engine Test (temporary, owner only)</h3>
-
-<p class="small">Dry run only: checks what the engine would do. It changes nothing and sends no notifications.</p>
-
-<button
-class="btn"
-id="absenceEngineTestButton"
-onclick="runAbsenceEngineDryTest()">
-▶ Run Dry Test
-</button>
-
-<p class="small" id="absenceEngineTestStatus" style="margin-top:8px; white-space:pre-line;">Not tested yet</p>
-
-</div>
-
-
-<!-- =========================
-     TEMPORARY (Stage 7C): OWNER-ONLY ABSENCE PUSH TEST
-     Hidden by default; shown only by applyOwnerVisibility().
-     Sends ONE labelled TEST notification to the Owner's own devices.
-     Remove together with runAbsencePushTest() in script.js.
-========================= -->
-
-<div class="panel" id="absencePushTestPanel" style="display:none;">
-
-<h3>🧪 Absence Push Test (temporary, owner only)</h3>
-
-<p class="small">Sends one clearly-labelled TEST attendance alert to your own devices only. No real student or alert is involved.</p>
-
-<button
-class="btn"
-id="absencePushTestButton"
-onclick="runAbsencePushTest()">
-🔔 Send Test Absence Push
-</button>
-
-<p class="small" id="absencePushTestStatus" style="margin-top:8px; white-space:pre-line;">Not tested yet</p>
 
 </div>
 
@@ -1774,4 +1701,4 @@ if ("serviceWorker" in navigator) {
   </script>
   
 </body>
-          </html>
+              </html>
