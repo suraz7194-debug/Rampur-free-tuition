@@ -4325,3 +4325,59 @@ body{
         padding:15px;
     }
 }
+
+/* ===== UI fixes (Oct 2026) BEGIN =====
+   1) Notification bell shortcut in the header (top-right).
+   2) Unselected Absence Alerts / Events filter buttons: .btn forces white
+      text, but .group-buttons gives them a light-gray background, so the
+      label was white-on-gray (about 1.2:1). Dark text for the unselected
+      state only. The selected state is unchanged: .group-buttons button.active
+      (specificity 0,2,1) still wins over this rule (0,2,0) and stays blue/white. */
+
+header{
+    position:relative;
+}
+
+.header-bell{
+    position:absolute;
+    top:8px;
+    right:8px;
+    width:36px;
+    height:36px;
+    padding:0;
+    border:none;
+    border-radius:999px;
+    background:rgba(255, 255, 255, 0.15);
+    color:inherit;
+    font-size:1.15rem;
+    line-height:1;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    cursor:pointer;
+}
+
+@media (max-width:440px){
+    header h1{
+        padding-right:40px;   /* keep the title clear of the bell; title stays on one line */
+    }
+}
+
+.header-bell:hover{
+    background:rgba(255, 255, 255, 0.3);
+}
+
+.header-bell:focus-visible{
+    outline:2px solid #ffffff;
+    outline-offset:2px;
+}
+
+#notificationPanel{
+    scroll-margin-top:76px;   /* keep the panel clear of the sticky nav bar */
+    outline:none;
+}
+
+.group-buttons .btn{
+    color:#1f2937;
+}
+/* ===== UI fixes (Oct 2026) END ===== */
