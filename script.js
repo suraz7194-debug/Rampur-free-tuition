@@ -1,6 +1,7 @@
 let selectedStudentPhoto = "";
 let selectedEditPhoto = "";
 let selectedHistoryStudentId = null;
+let historyAttendanceMonth = null;   // "YYYY-MM" chosen in Student History; null/invalid = current local month
 
 /* =====================================================
    SUPABASE
@@ -161,21 +162,6 @@ function applyOwnerVisibility() {
     // just at login/role-refresh time.)
     let eventFormPanel = document.getElementById("eventFormPanel");
     if (eventFormPanel) eventFormPanel.style.display = owner ? "" : "none";
-
-    // TEMPORARY (Stage 6A): owner-only Send Test Push panel. Hidden in
-    // the HTML by default; only ever shown here. Remove with the panel.
-    let pushTestPanel = document.getElementById("pushTestPanel");
-    if (pushTestPanel) pushTestPanel.style.display = owner ? "" : "none";
-
-    // TEMPORARY (Stage 7B-test): owner-only Absence Alert Engine dry-run panel.
-    // Hidden in the HTML by default; only ever shown here. Remove with the panel.
-    let absenceEngineTestPanel = document.getElementById("absenceEngineTestPanel");
-    if (absenceEngineTestPanel) absenceEngineTestPanel.style.display = owner ? "" : "none";
-
-    // TEMPORARY (Stage 7C): owner-only Absence Push Test panel. Hidden in the
-    // HTML by default; only ever shown here. Remove with the panel.
-    let absencePushTestPanel = document.getElementById("absencePushTestPanel");
-    if (absencePushTestPanel) absencePushTestPanel.style.display = owner ? "" : "none";
 }
 
 /* =====================================================
@@ -443,236 +429,24 @@ async function testLocalNotification() {
 }
 
 /* =====================================================
-   TEMPORARY (Stage 6A) - OWNER-ONLY "SEND TEST PUSH" BUTTON HANDLER
-   Invokes the already-deployed "push-test" Edge Function with the
-   existing authenticated Supabase session. Sends no recipient, no
-   payload, no keys. The function itself requires a valid JWT and only
-   ever targets the caller's own active subscription.
-   NOTE: a success result means only that the push service ACCEPTED the
-   request - NOT that the phone displayed a notification.
-   Remove this function, pushTestPanel in index.html, and the one line
-   in applyOwnerVisibility() when testing is finished.
+   NOTIFICATION BELL (header shortcut)
+   Only navigates: goes to the Dashboard through the existing
+   showSection() if needed, then scrolls to the existing Notifications
+   panel. It never requests permission, subscribes, or sends anything.
 ===================================================== */
-let pushTestInFlight = false;
+function goToNotificationSettings() {
+    const panel = document.getElementById("notificationPanel");
+    const dashboard = document.getElementById("dashboard");
+    if (!panel || !dashboard) return;
 
-async function sendTestPush() {
-    if (!isOwner()) return;          // defensive: UI is already hidden for non-owners
-    if (pushTestInFlight) return;    // prevent duplicate simultaneous requests
-
-    const button = document.getElementById("pushTestButton");
-    const status = document.getElementById("pushTestStatus");
-    const setStatus = text => { if (status) status.innerText = text; };
-
-    if (!navigator.onLine) {
-        setStatus("❌ Push test failed: this device is offline.");
-        return;
+    if (!dashboard.classList.contains("active")) {
+        const dashboardBtn = document.querySelector("nav button[onclick^=\"showSection('dashboard'\"]");
+        if (dashboardBtn) showSection("dashboard", dashboardBtn);
     }
 
-    pushTestInFlight = true;
-    if (button) button.disabled = true;
-    setStatus("Sending test push request...");
-
-    try {
-        const { data, error } = await supabaseClient.functions.invoke("push-test");
-
-        if (error) {
-            // Non-2xx: the function's JSON body carries a safe, plain-language
-            // message (it never contains secrets). Only that message is shown.
-            let message = "request failed.";
-            try {
-                if (error.context && typeof error.context.json === "function") {
-                    const body = await error.context.json();
-                    if (body && typeof body.error === "string") message = body.error;
-                }
-            } catch (_) { /* body unreadable - keep generic message */ }
-            setStatus("❌ Push test failed: " + message);
-        } else if (data && data.ok === true) {
-            setStatus("✅ Push request accepted — check your phone. (This does not prove it was displayed.)");
-        } else {
-            setStatus("❌ Push test failed: unexpected response.");
-        }
-    } catch (err) {
-        console.warn("Send test push failed:", err);
-        setStatus("❌ Push test failed: could not reach the server.");
-    } finally {
-        pushTestInFlight = false;
-        if (button) button.disabled = false;
-    }
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    try { panel.focus({ preventScroll: true }); } catch (e) { /* focus is a nicety only */ }
 }
-
-/* =====================================================
-   TEMPORARY (Stage 7B-test) - OWNER-ONLY "RUN DRY TEST" HANDLER
-   Invokes the already-deployed "absence-alert-engine" Edge Function in
-   DRY-RUN mode using the existing authenticated Supabase session.
-
-   Contract (verified against the deployed function): POST with a JSON body;
-   the function only writes when the body has apply === true. This handler
-   ALWAYS sends { apply: false } and never sends apply: true. It also refuses
-   to show a result as OK unless the function itself reports dryRun === true.
-
-   Displays only an allow-listed set of numbers/labels from the response -
-   never the raw response, headers or tokens. Remove this function,
-   absenceEngineTestPanel in index.html, and the one block in
-   applyOwnerVisibility() when testing is finished.
-===================================================== */
-let absenceEngineTestInFlight = false;
-
-async function runAbsenceEngineDryTest() {
-    if (!isOwner()) return;                     // defensive: UI is already hidden for non-owners
-    if (absenceEngineTestInFlight) return;      // prevent duplicate simultaneous requests
-
-    const button = document.getElementById("absenceEngineTestButton");
-    const status = document.getElementById("absenceEngineTestStatus");
-    const setStatus = text => { if (status) status.textContent = text; };
-    const num = v => (typeof v === "number" && isFinite(v)) ? String(v) : "?";
-
-    if (!navigator.onLine) {
-        setStatus("Absence engine test failed: this device is offline.");
-        return;
-    }
-
-    absenceEngineTestInFlight = true;
-    if (button) { button.disabled = true; button.textContent = "⏳ Running..."; }
-    setStatus("Running dry test...");
-
-    try {
-        const { data, error } = await supabaseClient.functions.invoke("absence-alert-engine", {
-            body: { apply: false }              // explicit DRY RUN - never true from this UI
-        });
-
-        if (error) {
-            // Non-2xx: the function's JSON body carries a safe plain-language message.
-            let message = "request failed.";
-            try {
-                if (error.context && typeof error.context.json === "function") {
-                    const body = await error.context.json();
-                    if (body && typeof body.error === "string") message = body.error;
-                }
-            } catch (_) { /* body unreadable - keep generic message */ }
-            setStatus("Absence engine test failed: " + message);
-        } else if (!data || data.ok !== true) {
-            setStatus("Absence engine test failed: unexpected response.");
-        } else if (data.dryRun !== true) {
-            // Must never happen from this UI; refuse to present it as a dry-run result.
-            setStatus("⚠ The function did not report dry-run mode. Do not rely on this result - check the database.");
-        } else {
-            const planned = data.planned || {};
-            const applied = data.applied || {};
-            const lines = [
-                "✅ Dry run completed (dry-run mode confirmed by the function).",
-                "Students evaluated: " + num(data.studentsEvaluated),
-                "Attendance rows read: " + num(data.attendanceRowsRead),
-                "Open alerts read: " + num(data.openAlertsRead),
-                "Would create: " + num(planned.create) +
-                    " · Would update: " + num(planned.update) +
-                    " · Would resolve: " + num(planned.resolve),
-                "No change needed: " + num(data.unchanged),
-                "Applied (must be 0 in a dry run): create " + num(applied.create) +
-                    ", update " + num(applied.update) + ", resolve " + num(applied.resolve)
-            ];
-            const actions = Array.isArray(data.actions) ? data.actions.slice(0, 5) : [];
-            actions.forEach(a => {
-                const type = ["create", "update", "resolve"].includes(a && a.type) ? a.type : "?";
-                const sid = (a && typeof a.student_id === "string") ? a.student_id.slice(0, 8) : "?";
-                lines.push("  • would " + type + " — student " + sid + "…" +
-                    (typeof a.absent_count === "number" ? " (" + a.absent_count + " absences)" : ""));
-            });
-            setStatus(lines.join("\n"));
-        }
-    } catch (err) {
-        console.warn("Absence engine dry test failed:", err);
-        setStatus("Absence engine test failed: could not reach the server.");
-    } finally {
-        absenceEngineTestInFlight = false;
-        if (button) { button.disabled = false; button.textContent = "▶ Run Dry Test"; }
-    }
-}
-
-/* =====================================================
-   TEMPORARY (Stage 7C) - OWNER-ONLY "SEND TEST ABSENCE PUSH" HANDLER
-   Invokes the deployed "absence-alert-notify" Edge Function in its
-   SYNTHETIC test mode: one clearly-labelled TEST notification is sent to
-   the logged-in Owner's OWN subscribed devices only. No absence_alerts
-   row is read, created or changed, and no real student/attendance data
-   is involved. The request carries only { mode: "synthetic" } - no
-   recipient, content, key or alert id can be supplied from here.
-   Results are shown from an allow-list of labels/numbers only.
-   NOTE: "accepted" means the push service accepted the request, NOT
-   that the phone displayed it.
-   Remove this function, absencePushTestPanel in index.html, and the one
-   block in applyOwnerVisibility() when testing is finished.
-===================================================== */
-let absencePushTestInFlight = false;
-
-async function runAbsencePushTest() {
-    if (!isOwner()) return;                     // defensive: UI is already hidden for non-owners
-    if (absencePushTestInFlight) return;        // prevent duplicate simultaneous requests
-
-    const button = document.getElementById("absencePushTestButton");
-    const status = document.getElementById("absencePushTestStatus");
-    const setStatus = text => { if (status) status.textContent = text; };
-    const num = v => (typeof v === "number" && isFinite(v)) ? v : 0;
-
-    if (!navigator.onLine) {
-        setStatus("Absence push test failed: this device is offline.");
-        return;
-    }
-
-    absencePushTestInFlight = true;
-    if (button) { button.disabled = true; button.textContent = "⏳ Sending..."; }
-    setStatus("Sending test push request...");
-
-    const messages = {
-        already_sent_today: "ℹ️ Already sent today for this test — duplicate protection worked. No new notification was sent.",
-        no_active_subscription: "❌ No active notification subscription found for your account. Enable notifications first.",
-        no_authorized_recipients: "❌ Your account is not an authorized recipient.",
-        vapid_configuration_error: "❌ Push server configuration error.",
-        push_failed: "❌ The push service rejected or could not deliver the request.",
-        database_error: "❌ A database error occurred on the server.",
-        invalid_request: "❌ The request was not valid."
-    };
-
-    try {
-        const { data, error } = await supabaseClient.functions.invoke("absence-alert-notify", {
-            body: { mode: "synthetic" }         // the only thing this UI can ever request
-        });
-
-        let result = null, body = data;
-        if (error) {
-            body = null;
-            try {
-                if (error.context && typeof error.context.json === "function") body = await error.context.json();
-            } catch (_) { /* unreadable body - generic message below */ }
-            result = body && typeof body.result === "string" ? body.result : null;
-            if (result === "owner_required") setStatus("Absence push test failed: Owner access required.");
-            else if (result === "unauthenticated") setStatus("Absence push test failed: please log in again.");
-            else if (result && messages[result]) setStatus("Absence push test failed: " + messages[result].replace(/^❌ /, ""));
-            else setStatus("Absence push test failed: request failed.");
-        } else {
-            result = body && typeof body.result === "string" ? body.result : null;
-            const subs = (body && body.subscriptions) || {};
-            if (result === "sent") {
-                const lines = [
-                    "✅ Push request accepted for " + num(subs.succeeded) + " device(s) — check your phone. (This does not prove it was displayed.)",
-                    "Devices that failed: " + num(subs.failed) + " · Expired devices deactivated: " + num(subs.expiredDeactivated),
-                    "Test alert only — no real alert, student or attendance data was used."
-                ];
-                setStatus(lines.join("\n"));
-            } else if (result && messages[result]) {
-                setStatus(messages[result]);
-            } else {
-                setStatus("Absence push test failed: unexpected response.");
-            }
-        }
-    } catch (err) {
-        console.warn("Absence push test failed:", err);
-        setStatus("Absence push test failed: could not reach the server.");
-    } finally {
-        absencePushTestInFlight = false;
-        if (button) { button.disabled = false; button.textContent = "🔔 Send Test Absence Push"; }
-    }
-}
-
 
 /* =====================================================
    ADMIN LOGIN & SESSION (OFFLINE READY)
@@ -5381,6 +5155,7 @@ Group ${escapeHTML(student.group)}
 function selectHistoryStudent(id){
 
     selectedHistoryStudentId = id;
+    historyAttendanceMonth = historyCurrentMonth();   // newly selected student starts on the current local month
 
 
     let student =
@@ -5436,6 +5211,33 @@ function selectHistoryStudent(id){
 /* =====================================================
    STUDENT HISTORY
 ===================================================== */
+
+/* Month filter for the Attendance Summary / Date-Status table below.
+   Months are plain "YYYY-MM" strings compared against the stored
+   "YYYY-MM-DD" attendance keys, so no Date parsing / timezone shift. */
+const HISTORY_MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"];
+
+function historyCurrentMonth() {
+    return today().slice(0, 7);   // device-local month (today() is local, never UTC)
+}
+
+function historySelectedMonth() {
+    return /^\d{4}-(0[1-9]|1[0-2])$/.test(historyAttendanceMonth || "")
+        ? historyAttendanceMonth
+        : historyCurrentMonth();
+}
+
+function historyMonthLabel(month) {   // "2026-10" -> "October 2026"
+    let m = /^(\d{4})-(\d{2})$/.exec(month);
+    return m ? HISTORY_MONTH_NAMES[+m[2] - 1] + " " + m[1] : month;
+}
+
+function setHistoryAttendanceMonth(value) {
+    historyAttendanceMonth = /^\d{4}-(0[1-9]|1[0-2])$/.test(value || "") ? value : historyCurrentMonth();
+    renderStudentHistory();   // same student; only this view re-renders
+}
+
 function renderStudentHistory() {
 
     if (!selectedHistoryStudentId) {
@@ -5459,8 +5261,12 @@ function renderStudentHistory() {
 
     let content = document.getElementById("studentHistoryContent");
 
+    let month = historySelectedMonth();
+    let monthPrefix = month + "-";
     let present = 0;
     let absent = 0;
+    let lifetimePresent = 0;   // all months: only feeds the existing top "Attendance" card
+    let lifetimeAbsent = 0;
     let attendanceRows = "";
 
     Object.keys(attendance)
@@ -5469,6 +5275,12 @@ function renderStudentHistory() {
         .forEach(date => {
             let status = attendance[date][id];
             if (!status) return;
+
+            if (status === "present") lifetimePresent++;
+            if (status === "absent") lifetimeAbsent++;
+
+            // Attendance Summary + Date/Status rows show the selected month only.
+            if (!date.startsWith(monthPrefix)) return;
 
             if (status === "present") present++;
             if (status === "absent") absent++;
@@ -5485,6 +5297,8 @@ function renderStudentHistory() {
 
     let totalAttendance = present + absent;
     let attendancePercent = totalAttendance === 0 ? 0 : (present / totalAttendance) * 100;
+    let lifetimeTotal = lifetimePresent + lifetimeAbsent;
+    let lifetimePercent = lifetimeTotal === 0 ? 0 : (lifetimePresent / lifetimeTotal) * 100;
 
     /* FEE HISTORY */
     let feeRows = "";
@@ -5591,7 +5405,7 @@ function renderStudentHistory() {
                 <div class="history-summary-icon">📅</div>
                 <div>
                     <span>Attendance</span>
-                    <strong>${attendancePercent.toFixed(1)}%</strong>
+                    <strong>${lifetimePercent.toFixed(1)}%</strong>
                 </div>
             </div>
 
@@ -5622,6 +5436,10 @@ function renderStudentHistory() {
 
         <div class="panel">
             <h3>📅 Attendance Summary</h3>
+            <div class="month-box" style="margin-bottom:10px;">
+                <label for="historyAttendanceMonth"><b>Month:</b></label>
+                <input type="month" id="historyAttendanceMonth" value="${month}" onchange="setHistoryAttendanceMonth(this.value)">
+            </div>
             <p>Present: <b class="present">${present}</b></p>
             <p>Absent: <b class="absent">${absent}</b></p>
             <p>Total Recorded: <b>${totalAttendance}</b></p>
@@ -5632,7 +5450,7 @@ function renderStudentHistory() {
                     <tr><th>Date</th><th>Status</th></tr>
                 </thead>
                 <tbody>
-                    ${attendanceRows || `<tr><td colspan="2" class="empty">No attendance recorded.</td></tr>`}
+                    ${attendanceRows || `<tr><td colspan="2" class="empty">No attendance records for ${escapeHTML(historyMonthLabel(month))}.</td></tr>`}
                 </tbody>
             </table>
         </div>
